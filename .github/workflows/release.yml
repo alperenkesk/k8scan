@@ -1,0 +1,61 @@
+name: Build and Release k8scan
+
+on:
+  push:
+    tags:
+      - 'v*' # Sadece v ile başlayan etiket bildirimlerinde (push) çalışır (örneğin: v1.0.0)
+
+permissions:
+  contents: write # Release sayfasında dosya oluşturabilmek için GitHub Token'a yazma izni verir
+
+jobs:
+  build-and-release:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            executable: k8scan
+            asset_name: k8scan-linux-amd64
+          - os: windows-latest
+            executable: k8scan.exe
+            asset_name: k8scan-windows-amd64.exe
+          - os: macos-latest
+            executable: k8scan
+            asset_name: k8scan-darwin-amd64
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build Executable with PyInstaller
+        run: |
+          pyinstaller --onefile --name k8scan k8scan
+
+      - name: Rename Artifact (Unix)
+        if: runner.os != 'Windows'
+        run: mv dist/${{ matrix.executable }} dist/${{ matrix.asset_name }}
+
+      - name: Rename Artifact (Windows)
+        if: runner.os == 'Windows'
+        run: Rename-Item -Path "dist\${{ matrix.executable }}" -NewName "${{ matrix.asset_name }}"
+
+      - name: Publish Release to GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/${{ matrix.asset_name }}
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
