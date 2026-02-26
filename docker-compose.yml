@@ -1,0 +1,11 @@
+version: '3.8'
+
+services:
+  k8scan:
+    build: .
+    volumes:
+      - ~/.kube:/root/.kube:ro
+      - ./reports:/app/reports
+    environment:
+      - KUBECONFIG=/root/.kube/config
+    command: k8scan scan --output all --output-file /app/reports/scan-report
