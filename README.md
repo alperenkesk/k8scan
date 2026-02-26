@@ -136,7 +136,7 @@ Contributions are welcome!
 3. Commit your changes
 4. Push to the branch
 5. Open a Pull Request
-6. See `CONTRIBUTING.md` for extended details.
+6. See `.github/CONTRIBUTING.md` for extended details.
 
 ---
 
