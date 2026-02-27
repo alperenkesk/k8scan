@@ -19,6 +19,25 @@
 
 ---
 
+## 🎯 What it Finds (Vulnerability Categories)
+
+`k8scan` actively looks for over 50+ critical security risks across your cluster, including:
+
+* **Container Escapes:** Privileged pods, dangerous `hostPath` mounts, `hostPID/IPC/Network` sharing, dangerous capabilities.
+* **RBAC Privilege Escalation:** Wildcard (`*`) permissions, `pod/exec` rights, granting `cluster-admin` to default service accounts.
+* **Network & Exposure:** Exposed NodePort services, unauthenticated databases, exposed dashboards, missing NetworkPolicies.
+* **Control Plane Misconfigurations:** Unauthenticated API server access, exposed Kubelet endpoints, anonymous access.
+* **Secret Management:** Hardcoded API keys, passwords, and tokens in environment variables or ConfigMaps.
+
+### 📸 Precise Vulnerability Detection
+![Vulnerability Example](screenshots/example-vuln.png)
+
+### 💻 Automated Proof of Concept (PoC) Generation
+`k8scan` not only detects misconfigurations but also translates them into directly reproducible exploit commands to demonstrate real-world impact.
+![PoC Example](screenshots/example-poc.png)
+
+---
+
 ## ✨ Key Features
 
 - 🛡️ **Safe & Read-Only:** Exclusively performs read operations, making it 100% safe for production environments.
