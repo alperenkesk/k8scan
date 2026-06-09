@@ -35,6 +35,8 @@ venv.bak/
 .DS_Store
 k8s-scan-report.*
 
-# Reports directory - all scan outputs
+# Reports directory - scan outputs
 reports/
-reports/
+
+# Compiled binaries
+bin/

@@ -1,15 +1,14 @@
-FROM python:3.11-slim
+FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends curl && \
-    rm -rf /var/lib/apt/lists/*
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY go.mod go.sum ./
+RUN go mod download
 
 COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o k8scan ./cmd/k8scan
 
-ENTRYPOINT ["./k8scan"]
-CMD ["scan"]
+FROM gcr.io/distroless/static-debian12:nonroot
+
+COPY --from=builder /app/k8scan /k8scan
+
+ENTRYPOINT ["/k8scan"]
