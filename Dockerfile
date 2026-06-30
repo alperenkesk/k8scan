@@ -5,7 +5,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-s -w" -o k8scan ./cmd/k8scan
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags "-X main.version=${VERSION} -s -w" -o k8scan ./cmd/k8scan
 
 FROM gcr.io/distroless/static-debian12:nonroot
 

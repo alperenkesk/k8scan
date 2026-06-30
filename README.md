@@ -108,6 +108,17 @@ make release
 ### Docker
 
 ```bash
+# Pull from GitHub Container Registry (recommended)
+docker pull ghcr.io/alperenkesk/k8scan:latest
+docker run -v ~/.kube:/root/.kube:ro ghcr.io/alperenkesk/k8scan:latest scan
+
+# Pin to a specific version
+docker pull ghcr.io/alperenkesk/k8scan:v2.0
+```
+
+Or build locally:
+
+```bash
 docker build -t k8scan .
 docker run -v ~/.kube:/root/.kube:ro k8scan scan
 ```
