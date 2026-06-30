@@ -17,7 +17,7 @@ Thank you for your interest in contributing to k8scan! This document provides gu
    - Clear title and description
    - Steps to reproduce
    - Expected vs actual behavior
-   - Environment details (OS, Python version, k8s version)
+   - Environment details (OS, Go version, k8s version)
 
 ### Suggesting Features
 
@@ -33,12 +33,12 @@ Thank you for your interest in contributing to k8scan! This document provides gu
    git checkout -b feature/my-feature
    ```
 3. **Make your changes**:
-   - Write clear, commented code
+   - Write clear, idiomatic Go code
    - Follow existing code style
    - Add tests if applicable
 4. **Test your changes**:
    ```bash
-   python -m pytest tests/
+   go test ./...
    ```
 5. **Commit** with clear messages:
    ```bash
@@ -57,89 +57,106 @@ Thank you for your interest in contributing to k8scan! This document provides gu
 git clone https://github.com/yourusername/k8scan.git
 cd k8scan
 
-# Create virtual environment
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# Download dependencies
+go mod tidy
 
-# Install dependencies
-pip install -r requirements.txt
+# Build the binary
+go build -o bin/k8scan ./cmd/k8scan
 
-# Install dev dependencies
-pip install pytest black flake8
+# Or use the Makefile
+make build
 
-# Run tests
-pytest tests/
+# Run locally
+make run
 ```
+
+**Requirements:**
+- Go 1.24+
+- Access to a Kubernetes cluster (or use `--kubeconfig` to point to a local cluster like kind/minikube)
 
 ## Code Style
 
-- Follow PEP 8 guidelines
-- Use meaningful variable names
-- Add docstrings to functions and classes
+- Follow standard Go conventions (`gofmt`, `go vet`)
+- Use meaningful variable and function names
 - Keep functions focused and small
+- Run the linter before submitting:
+  ```bash
+  golangci-lint run ./...
+  # or
+  make lint
+  ```
 
 ### Example:
 
-```python
-def scan_pods(pods: list) -> list:
-    """
-    Scan pods for security issues.
-    
-    Args:
-        pods: List of pod objects from Kubernetes API
-        
-    Returns:
-        List of Finding objects
-    """
-    findings = []
-    # Implementation
+```go
+// ScanPods checks pods for security misconfigurations.
+func ScanPods(pods []corev1.Pod) []Finding {
+    var findings []Finding
+    for _, pod := range pods {
+        // scan logic
+    }
     return findings
+}
 ```
 
 ## Testing
 
 - Write tests for new features
-- Ensure existing tests pass
+- Ensure existing tests pass before submitting:
+  ```bash
+  go test ./... -race -count=1
+  # or
+  make test
+  ```
 - Test with different Kubernetes versions if possible
 
 ## Documentation
 
-- Update README.md for user-facing changes
-- Add docstrings for new functions/classes
+- Update `README.md` for user-facing changes
+- Add comments for exported functions and types
 - Update examples if behavior changes
 
 ## Adding New Security Checks
 
-1. Create module in `src/modules/internal/`
-2. Add exploit information in `src/exploits/`
-3. Update exploit mapper
-4. Add tests
-5. Document the check
+1. Create your scanner under `internal/modules/`
+2. Implement the scanner logic and register it
+3. Add tests covering both vulnerable and clean cases
+4. Document the check in `README.md`
 
 ### Example Structure:
 
-```python
-# src/modules/internal/my_scanner.py
-class MyScanner:
-    def scan(self, resources):
-        findings = []
-        # Scan logic
-        return findings
+```go
+// internal/modules/my_check.go
+package modules
 
-# src/exploits/my_exploits.py
-class MyExploits:
-    @staticmethod
-    def my_vulnerability():
-        return {
-            'exploitation': [...],
-            'attack_flow': [...],
-            'impact': '...',
-            'cvss_score': 8.5
-        }
+import (
+    "github.com/alperenkeskin/k8scan/internal/findings"
+    corev1 "k8s.io/api/core/v1"
+)
+
+func CheckMyVulnerability(pods []corev1.Pod) []findings.Finding {
+    var result []findings.Finding
+    for _, pod := range pods {
+        // detection logic
+    }
+    return result
+}
 ```
+
+## Useful Make Targets
+
+| Command        | Description                        |
+|----------------|------------------------------------|
+| `make build`   | Build the binary to `bin/k8scan`   |
+| `make test`    | Run all tests with race detector   |
+| `make lint`    | Run golangci-lint                  |
+| `make tidy`    | Run `go mod tidy`                  |
+| `make clean`   | Remove build artifacts             |
+| `make docker`  | Build Docker image                 |
+| `make release` | Cross-compile for all platforms    |
 
 ## Questions?
 
 Feel free to open an issue for any questions about contributing!
 
-Thank you for making k8scan better! 🚀
+Thank you for making k8scan better!
