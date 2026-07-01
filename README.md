@@ -3,7 +3,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat&logo=go&logoColor=white" alt="Go Version">
   <img src="https://img.shields.io/badge/Kubernetes-1.20+-326CE5?style=flat&logo=kubernetes&logoColor=white" alt="Kubernetes">
-  <img src="https://img.shields.io/badge/License-MIT-yellow?style=flat" alt="License">
+  <img src="https://img.shields.io/badge/License-Elastic--2.0-blue?style=flat" alt="License">
   <img src="https://img.shields.io/badge/Version-2.0-orange?style=flat" alt="Version">
 </p>
 
@@ -290,6 +290,12 @@ SARIF output is compatible with GitHub Advanced Security, GitLab Security Dashbo
 5. Open a Pull Request
 
 ---
+
+## License
+
+Licensed under the [Elastic License 2.0](LICENSE). Source code is available for personal use, internal security auditing, and contributions. You may not provide k8scan as a hosted or managed service to third parties without a commercial agreement.
+
+For commercial licensing inquiries: start@k8scan.com
 
 ## Disclaimer
 
