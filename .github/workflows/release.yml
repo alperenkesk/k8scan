@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Build binaries
+        run: |
+          VERSION=${{ github.ref_name }}
+          LDFLAGS="-X main.version=${VERSION} -s -w"
+          mkdir -p bin
+          GOOS=linux   GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o bin/k8scan-linux-amd64       ./cmd/k8scan
+          GOOS=linux   GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o bin/k8scan-linux-arm64       ./cmd/k8scan
+          GOOS=darwin  GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o bin/k8scan-darwin-amd64      ./cmd/k8scan
+          GOOS=darwin  GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o bin/k8scan-darwin-arm64      ./cmd/k8scan
+          GOOS=windows GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o bin/k8scan-windows-amd64.exe ./cmd/k8scan
+
+      - name: Generate checksums
+        run: cd bin && sha256sum k8scan-* > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: k8scan ${{ github.ref_name }}
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            bin/k8scan-linux-amd64
+            bin/k8scan-linux-arm64
+            bin/k8scan-darwin-amd64
+            bin/k8scan-darwin-arm64
+            bin/k8scan-windows-amd64.exe
+            bin/checksums.txt
