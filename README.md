@@ -82,6 +82,7 @@ Every Capability Break ships a validation-focused PoC — read-only `kubectl` co
 - **CIS Benchmark Mapping** — findings are tagged with CIS Kubernetes Benchmark controls
 - **Suppression Rules** — `.k8scan-ignore.yaml` to silence known-accepted findings
 - **In-Cluster Scanning** — run as a Kubernetes Job or CronJob using the provided manifests in `deploy/`
+- **Cloud Export** — `k8scan-export.sh` bundles cluster manifests + image list into a single zip for upload to [k8scan.com](https://k8scan.com)
 
 ---
 
@@ -223,6 +224,30 @@ rules:
     resource: "batch-worker"
     reason: "Stateless batch job, HA not required"
 ```
+
+---
+
+## Cloud Scanning (k8scan.com)
+
+If you prefer not to run the CLI locally, use `k8scan-export.sh` to bundle your cluster state and upload it to the k8scan cloud platform.
+
+```bash
+# Export manifests from your current cluster context
+./k8scan-export.sh
+
+# Produces: k8scan-export-20260701-143022.zip
+# Upload at: https://k8scan.com
+```
+
+**What gets exported:**
+- All namespaced resources: Deployments, StatefulSets, DaemonSets, Jobs, CronJobs, Services, Ingresses, NetworkPolicies, RBAC bindings, ServiceAccounts, ConfigMaps
+- Cluster-scoped resources: ClusterRoles, ClusterRoleBindings, Namespaces, PodSecurityPolicies
+- `images.txt` — unique container image list for optional image vulnerability correlation
+- `meta.yaml` — cluster context and export timestamp
+
+**What does NOT leave your cluster:** secrets, persistent volume data, runtime state, logs.
+
+> For environments where data cannot leave the network, use the [on-prem deployment](https://k8scan.com#on-prem) instead.
 
 ---
 
