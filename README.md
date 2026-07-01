@@ -129,6 +129,15 @@ The image is built on `distroless/static-debian12:nonroot` — no shell, no pack
 ### In-Cluster (Job / CronJob)
 
 ```bash
+kubectl apply -k deploy/
+```
+
+This applies the provided Namespace, RBAC, one-off Job, and scheduled CronJob manifests. For GitOps workflows, create a Kustomize overlay that uses `deploy/` as a base and patches the schedule, image, or RBAC resources without editing these tracked manifests.
+
+You can also apply the raw YAML files individually:
+
+```bash
+kubectl apply -f deploy/k8scan-namespace.yaml
 kubectl apply -f deploy/k8scan-rbac.yaml
 kubectl apply -f deploy/k8scan-job.yaml      # one-off scan
 kubectl apply -f deploy/k8scan-cronjob.yaml  # scheduled scan

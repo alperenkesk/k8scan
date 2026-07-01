@@ -1,9 +1,4 @@
 ---
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: k8scan
----
 # One-shot scan Job — writes JSON report to /reports volume
 apiVersion: batch/v1
 kind: Job
