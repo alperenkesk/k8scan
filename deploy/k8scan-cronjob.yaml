@@ -23,7 +23,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: k8scan
-              image: ghcr.io/alperenkeskin/k8scan:latest
+              image: ghcr.io/alperenkesk/k8scan:latest
               args:
                 - scan
                 - --output-json=/reports/k8scan-report.json
