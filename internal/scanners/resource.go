@@ -311,9 +311,17 @@ func checkWorkloadContainers(spec corev1.PodSpec, rt, rn, ns string) []*core.Fin
 		})
 	}
 
-	// HostPath volume checks — uses prefix matching so /etc/kubernetes/pki is CRITICAL
+	// HostPath volume checks — only flag volumes actually mounted in a container.
+	// Volumes defined in spec.Volumes but absent from all container volumeMounts
+	// are harmless and would produce false positives.
+	mountedVols := make(map[string]bool)
+	for _, c := range append(spec.InitContainers, spec.Containers...) {
+		for _, vm := range c.VolumeMounts {
+			mountedVols[vm.Name] = true
+		}
+	}
 	for _, vol := range spec.Volumes {
-		if vol.HostPath == nil {
+		if vol.HostPath == nil || !mountedVols[vol.Name] {
 			continue
 		}
 		path := vol.HostPath.Path

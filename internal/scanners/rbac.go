@@ -64,6 +64,7 @@ func (RBACScanner) Scan(ctx context.Context, client core.KubeReader) ([]*core.Fi
 	findings = append(findings, checkDefaultSAUsedByPods(pods)...)
 	findings = append(findings, checkUnusedServiceAccounts(serviceAccounts, pods)...)
 	findings = append(findings, checkLegacySATokenMount(pods)...)
+	findings = append(findings, checkPrivilegedSABoundToWorkload(pods, roleBindings, clusterRoleBindings, roles, clusterRoles)...)
 
 	return findings, nil
 }
@@ -109,22 +110,39 @@ func checkRole(rules []rbacv1.PolicyRule, roleName, namespace, resourceType stri
 		resourceSet := utils.NewStringSet(rule.Resources...)
 
 		// Wildcard permissions — report once per role
+		// Distinguish: wildcard verbs (full control) vs wildcard resources with limited verbs (read-only access to all types)
 		if !wildcardReported && (verbSet.Has("*") || resourceSet.Has("*")) {
 			wildcardReported = true
 			ns := namespace
 			if ns == "" {
 				ns = "cluster-wide"
 			}
-			findings = append(findings, &core.Finding{
-				Severity:     core.SeverityCritical,
-				Category:     "rbac",
-				Title:        "Wildcard Permissions Granted",
-				Description:  fmt.Sprintf("%s '%s' grants wildcard (*) permissions. This allows full control over all resources.", resourceType, roleName),
-				ResourceType: resourceType,
-				ResourceName: roleName,
-				Namespace:    ns,
-				Remediation:  "Replace wildcards with specific verbs and resources following the principle of least privilege.",
-			})
+			if verbSet.Has("*") {
+				// Full wildcard: both verbs and resources — CRITICAL
+				findings = append(findings, &core.Finding{
+					Severity:     core.SeverityCritical,
+					Category:     "rbac",
+					Title:        "Wildcard Permissions Granted",
+					Description:  fmt.Sprintf("%s '%s' grants wildcard (*) verbs on all resources. This allows full create/read/update/delete control over every resource type.", resourceType, roleName),
+					ResourceType: resourceType,
+					ResourceName: roleName,
+					Namespace:    ns,
+					Remediation:  "Replace wildcards with specific verbs and resources following the principle of least privilege.",
+				})
+			} else {
+				// Wildcard resources but limited verbs — HIGH (read all resource types)
+				verbs := strings.Join(rule.Verbs, ", ")
+				findings = append(findings, &core.Finding{
+					Severity:     core.SeverityHigh,
+					Category:     "rbac",
+					Title:        "Wildcard Resource Access Granted",
+					Description:  fmt.Sprintf("%s '%s' grants access to all resource types (*) with verbs [%s]. Any new resource type added to the cluster is automatically accessible.", resourceType, roleName, verbs),
+					ResourceType: resourceType,
+					ResourceName: roleName,
+					Namespace:    ns,
+					Remediation:  "Replace the wildcard resource (*) with an explicit list of resource types the role actually needs.",
+				})
+			}
 		}
 
 		// Pod exec — report once per role
@@ -273,7 +291,8 @@ func checkRoleBinding(subjects []rbacv1.Subject, roleRef rbacv1.RoleRef, binding
 	var adminSubjectNames []string
 
 	for _, subj := range subjects {
-		if subj.Kind == "ServiceAccount" && subj.Namespace != "" && subj.Namespace != namespace {
+		if subj.Kind == "ServiceAccount" && subj.Namespace != "" && subj.Namespace != namespace &&
+			!knownSafeRBACBindings[bindingName] && !strings.HasPrefix(subj.Name, "system:controller:") {
 			findings = append(findings, &core.Finding{
 				Severity:     core.SeverityHigh,
 				Category:     "rbac",
@@ -381,7 +400,7 @@ func checkClusterRoleBinding(subjects []rbacv1.Subject, roleRef rbacv1.RoleRef, 
 			})
 		}
 
-		if subj.Kind == "Group" && subj.Name == "system:masters" {
+		if subj.Kind == "Group" && subj.Name == "system:masters" && !knownSafeRBACBindings[bindingName] {
 			findings = append(findings, &core.Finding{
 				Severity:     core.SeverityCritical,
 				Category:     "rbac",
@@ -487,6 +506,8 @@ var systemRolePrefixes = []string{
 	"argocd-", "flux-", "velero-", "crossplane-",
 	"tekton-", "knative-", "external-secrets-",
 	"karpenter-", "cluster-autoscaler-",
+	// kind / kubeadm storage provisioners
+	"local-path-provisioner", "rancher-local-path",
 }
 
 // builtinClusterRoles are Kubernetes default roles present in every cluster.
@@ -532,10 +553,15 @@ func isSystemSubject(name string) bool {
 // Flagging them as "Overly Permissive" or "Anonymous User Granted" produces
 // pure noise — they are part of the platform.
 var knownSafeRBACBindings = map[string]bool{
-	"system:basic-user":                   true, // SelfSubjectAccessReview / SelfSubjectRulesReview only
-	"system:discovery":                    true, // /api, /apis, /version discovery endpoints only
-	"system:public-info-viewer":           true, // /healthz, /livez, /readyz, /version only
+	"system:basic-user":                    true, // SelfSubjectAccessReview / SelfSubjectRulesReview only
+	"system:discovery":                     true, // /api, /apis, /version discovery endpoints only
+	"system:public-info-viewer":            true, // /healthz, /livez, /readyz, /version only
 	"kubeadm:bootstrap-signer-clusterinfo": true, // read-only access to cluster-info ConfigMap (required by kubeadm)
+	// cluster-admin CRB ships with every cluster: system:masters → cluster-admin
+	// This is the bootstrap binding — not user-created, cannot be removed safely.
+	"cluster-admin":                        true,
+	// bootstrap-signer cross-namespace binding is a built-in controller (kube-public)
+	"system:controller:bootstrap-signer":   true,
 }
 
 // checkDefaultSAUsedByPods flags non-system pods that use the default service account.
@@ -668,6 +694,147 @@ func checkLegacySATokenMount(pods []corev1.Pod) []*core.Finding {
 				Remediation:  "Use projected service account tokens (spec.volumes[].projected.sources[].serviceAccountToken with expirationSeconds). Set automountServiceAccountToken: false if API access is not needed.",
 			})
 		}
+	}
+	return findings
+}
+
+// checkPrivilegedSABoundToWorkload flags pods that use a non-default ServiceAccount
+// which has been granted sensitive permissions (secrets access, wildcard resources,
+// dangerous verb combinations) via RoleBinding or ClusterRoleBinding.
+// This catches the pattern where a developer creates a custom SA and accidentally
+// (or deliberately) grants it far more access than the workload needs.
+func checkPrivilegedSABoundToWorkload(
+	pods []corev1.Pod,
+	roleBindings []rbacv1.RoleBinding,
+	clusterRoleBindings []rbacv1.ClusterRoleBinding,
+	roles []rbacv1.Role,
+	clusterRoles []rbacv1.ClusterRole,
+) []*core.Finding {
+	// Build role → sensitive flag lookup
+	sensitiveRoles := make(map[string]string) // "ns/name" → reason
+	for _, r := range roles {
+		if isSystemRole(r.Name) {
+			continue
+		}
+		for _, rule := range r.Rules {
+			verbSet := utils.NewStringSet(rule.Verbs...)
+			resourceSet := utils.NewStringSet(rule.Resources...)
+			if verbSet.Has("*") || resourceSet.Has("*") {
+				sensitiveRoles[r.Namespace+"/"+r.Name] = "wildcard permissions"
+				break
+			}
+			if hasVerbForResource(rule, []string{"get", "list", "watch"}, "secrets") {
+				sensitiveRoles[r.Namespace+"/"+r.Name] = "secrets read access"
+				break
+			}
+		}
+	}
+	sensitiveClusterRoles := make(map[string]string) // "name" → reason
+	for _, cr := range clusterRoles {
+		if isSystemRole(cr.Name) {
+			continue
+		}
+		for _, rule := range cr.Rules {
+			verbSet := utils.NewStringSet(rule.Verbs...)
+			resourceSet := utils.NewStringSet(rule.Resources...)
+			if verbSet.Has("*") || resourceSet.Has("*") {
+				sensitiveClusterRoles[cr.Name] = "wildcard permissions"
+				break
+			}
+			if hasVerbForResource(rule, []string{"get", "list", "watch"}, "secrets") {
+				sensitiveClusterRoles[cr.Name] = "secrets read access"
+				break
+			}
+		}
+	}
+
+	// Build SA → sensitive reason via RoleBindings
+	saSensitive := make(map[string]string) // "ns/sa" → reason
+	for _, rb := range roleBindings {
+		var reason string
+		key := rb.Namespace + "/" + rb.RoleRef.Name
+		if rb.RoleRef.Kind == "Role" {
+			reason = sensitiveRoles[key]
+		} else if rb.RoleRef.Kind == "ClusterRole" {
+			reason = sensitiveClusterRoles[rb.RoleRef.Name]
+		}
+		if reason == "" {
+			continue
+		}
+		for _, subj := range rb.Subjects {
+			if subj.Kind == "ServiceAccount" {
+				ns := subj.Namespace
+				if ns == "" {
+					ns = rb.Namespace
+				}
+				saSensitive[ns+"/"+subj.Name] = fmt.Sprintf("%s via RoleBinding '%s'", reason, rb.Name)
+			}
+		}
+	}
+	for _, crb := range clusterRoleBindings {
+		reason := sensitiveClusterRoles[crb.RoleRef.Name]
+		if reason == "" {
+			continue
+		}
+		for _, subj := range crb.Subjects {
+			if subj.Kind == "ServiceAccount" {
+				ns := subj.Namespace
+				if ns == "" {
+					ns = "default"
+				}
+				saSensitive[ns+"/"+subj.Name] = fmt.Sprintf("%s via ClusterRoleBinding '%s'", reason, crb.Name)
+			}
+		}
+	}
+
+	seen := utils.NewStringSet()
+	var findings []*core.Finding
+	for _, pod := range pods {
+		sa := pod.Spec.ServiceAccountName
+		if sa == "" || sa == "default" {
+			continue
+		}
+		if isSystemNamespace(pod.Namespace) {
+			continue
+		}
+		key := pod.Namespace + "/" + sa
+		reason, ok := saSensitive[key]
+		if !ok {
+			continue
+		}
+		dedupKey := key + "/" + pod.GenerateName
+		if seen.Has(dedupKey) {
+			continue
+		}
+		seen.Add(dedupKey)
+
+		autoMount := pod.Spec.AutomountServiceAccountToken == nil || *pod.Spec.AutomountServiceAccountToken
+		desc := fmt.Sprintf(
+			"Pod '%s' (namespace: %s) uses ServiceAccount '%s' which has %s. "+
+				"The SA token is %s inside the pod at /var/run/secrets/kubernetes.io/serviceaccount/token — "+
+				"any process in the container can use it to call the Kubernetes API.",
+			pod.Name, pod.Namespace, sa, reason,
+			map[bool]string{true: "automatically mounted", false: "NOT mounted"}[autoMount],
+		)
+		findings = append(findings, &core.Finding{
+			Severity:     core.SeverityHigh,
+			Category:     "rbac",
+			Title:        "Sensitive ServiceAccount Bound to Workload",
+			Description:  desc,
+			ResourceType: "Pod",
+			ResourceName: pod.Name,
+			Namespace:    pod.Namespace,
+			Remediation:  fmt.Sprintf("Set automountServiceAccountToken: false on ServiceAccount '%s' or the pod spec if the workload does not need API access. If it does, scope the Role to only the specific resources and resource names required.", sa),
+			ProofOfConcept: fmt.Sprintf(
+				"# Read secrets from inside the pod using the mounted SA token\n"+
+					"kubectl exec -it %s -n %s -- sh -c \\\n"+
+					"  'curl -sk -H \"Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" "+
+					"https://kubernetes.default.svc/api/v1/namespaces/%s/secrets'\n\n"+
+					"# If secrets are returned: HIGH — scope the Role or disable automount",
+				pod.Name, pod.Namespace, pod.Namespace,
+			),
+			Metadata: map[string]any{"service_account": sa, "reason": reason},
+		})
 	}
 	return findings
 }

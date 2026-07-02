@@ -24,6 +24,7 @@ import (
 
 // ManifestStore holds all Kubernetes objects parsed from YAML manifests.
 type ManifestStore struct {
+	Nodes                 []corev1.Node
 	Pods                  []corev1.Pod
 	Secrets               []corev1.Secret
 	ConfigMaps            []corev1.ConfigMap

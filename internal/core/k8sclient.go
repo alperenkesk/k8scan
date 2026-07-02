@@ -117,6 +117,17 @@ func isForbidden(err error) bool {
 
 // --- Core v1 ---
 
+func (k *K8sClient) GetAllNodes(ctx context.Context) ([]corev1.Node, error) {
+	list, err := k.cs.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		if isForbidden(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return list.Items, nil
+}
+
 func (k *K8sClient) GetAllPods(ctx context.Context) ([]corev1.Pod, error) {
 	list, err := k.cs.CoreV1().Pods("").List(ctx, metav1.ListOptions{})
 	if err != nil {

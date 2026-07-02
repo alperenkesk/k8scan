@@ -22,6 +22,10 @@ func (NetworkScanner) Scan(ctx context.Context, client core.KubeReader) ([]*core
 	if err != nil {
 		return nil, err
 	}
+	nodes, err := client.GetAllNodes(ctx)
+	if err != nil {
+		return nil, err
+	}
 	netpols, err := client.GetAllNetworkPolicies(ctx)
 	if err != nil {
 		return nil, err
@@ -51,10 +55,13 @@ func (NetworkScanner) Scan(ctx context.Context, client core.KubeReader) ([]*core
 	var findings []*core.Finding
 
 	findings = append(findings, checkMissingNetworkPolicies(namespaces, netpols, nc)...)
-	findings = append(findings, checkCloudMetadataExposure(namespaces, netpols, nc)...)
+	if isCloudCluster(nodes) {
+		findings = append(findings, checkCloudMetadataExposure(namespaces, netpols, nc)...)
+	}
 	findings = append(findings, checkNamespaceResourceGovernance(namespaces, quotas, limitRanges, nc)...)
 	findings = append(findings, checkCrossNamespaceIsolation(namespaces, netpols, nc)...)
 	findings = append(findings, checkEndpointSSRF(endpoints)...)
+	findings = append(findings, checkUnauthenticatedDataStores(services, netpols, nc)...)
 
 	for _, np := range netpols {
 		findings = append(findings, checkNetworkPolicy(np)...)
@@ -118,9 +125,25 @@ func checkMissingNetworkPolicies(
 	return findings
 }
 
+// isCloudCluster returns true when at least one node has a cloud providerID
+// (aws://, gce://, azure://, digitalocean://, vsphere://, openstack://).
+// On kind, minikube, and bare-metal clusters providerID is empty or "kind://".
+func isCloudCluster(nodes []corev1.Node) bool {
+	cloudPrefixes := []string{"aws://", "gce://", "azure://", "digitalocean://", "vsphere://", "openstack://", "alicloud://"}
+	for _, node := range nodes {
+		for _, prefix := range cloudPrefixes {
+			if strings.HasPrefix(node.Spec.ProviderID, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // checkCloudMetadataExposure flags namespaces that do NOT have an egress rule
 // explicitly blocking 169.254.169.254 (cloud metadata API). Pods in such
 // namespaces can steal cloud IAM credentials via SSRF.
+// Only called when isCloudCluster() is true — on-prem/kind clusters skip this check.
 func checkCloudMetadataExposure(
 	namespaces []corev1.Namespace,
 	netpols []networkingv1.NetworkPolicy,
@@ -655,7 +678,7 @@ func checkNamespaceResourceGovernance(
 		}
 		if !quotaNS.Has(name) {
 			findings = append(findings, &core.Finding{
-				Severity:     core.SeverityMedium,
+				Severity:     core.SeverityLow,
 				Category:     "workload",
 				Title:        "Missing ResourceQuota on Namespace",
 				Description:  fmt.Sprintf("Namespace '%s' has no ResourceQuota. A single misbehaving workload can exhaust CPU/memory for the entire namespace or cluster.", name),
@@ -667,7 +690,7 @@ func checkNamespaceResourceGovernance(
 		}
 		if !limitNS.Has(name) {
 			findings = append(findings, &core.Finding{
-				Severity:     core.SeverityLow,
+				Severity:     core.SeverityInfo,
 				Category:     "workload",
 				Title:        "Missing LimitRange on Namespace",
 				Description:  fmt.Sprintf("Namespace '%s' has no LimitRange. Containers without explicit limits inherit no defaults and can consume unbounded resources.", name),
@@ -759,6 +782,132 @@ func checkEndpointSSRF(endpoints []corev1.Endpoints) []*core.Finding {
 						})
 					}
 				}
+			}
+		}
+	}
+	return findings
+}
+
+// checkUnauthenticatedDataStores flags well-known data store services (Redis,
+// Memcached, MongoDB, Elasticsearch) that are reachable within the cluster
+// without any NetworkPolicy restricting ingress. These services commonly ship
+// with authentication disabled by default and are a frequent lateral-movement
+// target once an attacker has a foothold in any pod.
+func checkUnauthenticatedDataStores(
+	services []corev1.Service,
+	netpols []networkingv1.NetworkPolicy,
+	nc *utils.NamespaceClassifier,
+) []*core.Finding {
+	type storeSpec struct {
+		port int32
+		name string
+		poc  string
+	}
+	stores := []storeSpec{
+		{6379, "Redis", "redis-cli -h {svc} KEYS '*' && redis-cli -h {svc} CONFIG GET requirepass"},
+		{11211, "Memcached", "echo 'stats' | nc {svc} 11211"},
+		{27017, "MongoDB", "mongo {svc}:27017 --eval 'db.adminCommand({listDatabases:1})'"},
+		{9200, "Elasticsearch", "curl -s http://{svc}:9200/_cat/indices"},
+		{5432, "PostgreSQL (no TLS check)", "psql -h {svc} -U postgres -c '\\l' 2>/dev/null"},
+	}
+
+	// Build set of namespaces that have ingress NetworkPolicy covering these ports
+	protectedNS := make(map[string]bool)
+	for _, np := range netpols {
+		if hasIngressPolicyType(np) {
+			protectedNS[np.Namespace] = true
+		}
+	}
+
+	var findings []*core.Finding
+
+	// Detect unauthenticated Docker registries (port 5000 with "registry" in name).
+	// Port 5000 is too generic (Flask, Python devservers) so we use a name heuristic.
+	for _, svc := range services {
+		if nc.IsLowRiskForNetworkPolicy(svc.Namespace) {
+			continue
+		}
+		nameLower := strings.ToLower(svc.Name)
+		if !strings.Contains(nameLower, "registry") {
+			continue
+		}
+		for _, port := range svc.Spec.Ports {
+			if port.Port != 5000 {
+				continue
+			}
+			protected := protectedNS[svc.Namespace]
+			severity := core.SeverityHigh
+			desc := fmt.Sprintf(
+				"Service '%s' (namespace: %s) appears to be a Docker registry (port 5000, name contains 'registry'). "+
+					"Unauthenticated registries allow any pod to pull images and enumerate repository contents, "+
+					"which may expose secrets baked into image layers or enable image substitution attacks.",
+				svc.Name, svc.Namespace,
+			)
+			if !protected {
+				severity = core.SeverityCritical
+				desc += " No NetworkPolicy is active in this namespace."
+			}
+			svcFQDN := fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)
+			findings = append(findings, &core.Finding{
+				Severity:     severity,
+				Category:     "network",
+				Title:        "Unauthenticated Container Registry Exposed",
+				Description:  desc,
+				ResourceType: "Service",
+				ResourceName: svc.Name,
+				Namespace:    svc.Namespace,
+				Remediation:  "Enable registry authentication (htpasswd or token-based). Add a NetworkPolicy restricting port 5000 to authorized workloads only.",
+				ProofOfConcept: fmt.Sprintf(
+					"# Enumerate unauthenticated registry from any pod in the cluster\n"+
+						"kubectl run poc-test --rm -it --restart=Never --image=alpine -- sh -c \\\n"+
+						"  \"wget -qO- http://%s/v2/_catalog && wget -qO- http://%s/v2/<repo>/manifests/latest\"\n\n"+
+						"# Check image manifests for secrets in ENV layers:\n"+
+						"# Look for ENV API_KEY=, ENV DB_PASSWORD=, ENV SECRET= in v1Compatibility fields",
+					svcFQDN, svcFQDN,
+				),
+				Metadata: map[string]any{"port": int32(5000), "store": "Docker Registry"},
+			})
+		}
+	}
+
+	for _, svc := range services {
+		if nc.IsLowRiskForNetworkPolicy(svc.Namespace) {
+			continue
+		}
+		for _, port := range svc.Spec.Ports {
+			for _, store := range stores {
+				if port.Port != store.port {
+					continue
+				}
+				protected := protectedNS[svc.Namespace]
+				severity := core.SeverityHigh
+				desc := fmt.Sprintf(
+					"Service '%s' (namespace: %s) exposes %s on port %d with no NetworkPolicy restricting ingress. "+
+						"%s commonly ships with authentication disabled — any pod in the cluster can connect and read data.",
+					svc.Name, svc.Namespace, store.name, store.port, store.name,
+				)
+				if !protected {
+					severity = core.SeverityCritical
+					desc += " No NetworkPolicy is active in this namespace."
+				}
+				pocCmd := strings.ReplaceAll(store.poc, "{svc}", fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace))
+				findings = append(findings, &core.Finding{
+					Severity:     severity,
+					Category:     "network",
+					Title:        fmt.Sprintf("Unauthenticated %s Service Exposed", store.name),
+					Description:  desc,
+					ResourceType: "Service",
+					ResourceName: svc.Name,
+					Namespace:    svc.Namespace,
+					Remediation:  fmt.Sprintf("Enable authentication on %s. Add a NetworkPolicy restricting ingress to port %d to only pods that require access.", store.name, store.port),
+					ProofOfConcept: fmt.Sprintf(
+						"# Verify unauthenticated %s access from any pod in the cluster\n"+
+							"kubectl run poc-test --rm -it --restart=Never --image=alpine -- sh -c \"%s\"\n\n"+
+							"# If connected without credentials: CRITICAL — enable auth immediately",
+						store.name, pocCmd,
+					),
+					Metadata: map[string]any{"port": store.port, "store": store.name},
+				})
 			}
 		}
 	}

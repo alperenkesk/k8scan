@@ -45,6 +45,10 @@ func (c *StaticClient) SourceLine(kind, namespace, name string) int {
 // Compile-time interface check.
 var _ core.KubeReader = (*StaticClient)(nil)
 
+func (c *StaticClient) GetAllNodes(_ context.Context) ([]corev1.Node, error) {
+	return c.store.Nodes, nil
+}
+
 func (c *StaticClient) GetAllPods(_ context.Context) ([]corev1.Pod, error) {
 	return c.store.Pods, nil
 }

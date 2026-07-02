@@ -16,6 +16,7 @@ import (
 // KubeReader is the read-only interface used by all scanners.
 // Both K8sClient (live cluster) and StaticClient (YAML/Helm offline) implement it.
 type KubeReader interface {
+	GetAllNodes(ctx context.Context) ([]corev1.Node, error)
 	GetAllPods(ctx context.Context) ([]corev1.Pod, error)
 	GetAllSecrets(ctx context.Context) ([]corev1.Secret, error)
 	GetAllConfigMaps(ctx context.Context) ([]corev1.ConfigMap, error)
