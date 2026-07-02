@@ -89,6 +89,13 @@ func checkImageDigestPin(image, containerName, rt, rn, ns string) []*core.Findin
 	if strings.Contains(image, "@sha256:") {
 		return nil // pinned with digest — immutable
 	}
+	// :latest and untagged images are already caught by "Image Using Latest Tag" in resource.go/pod.go.
+	// Only fire here for version-tagged images (e.g. nginx:1.25.3) that appear safe but aren't digest-pinned.
+	imgLower := strings.ToLower(image)
+	hasTag := strings.Contains(imgLower, ":")
+	if !hasTag || strings.HasSuffix(imgLower, ":latest") {
+		return nil
+	}
 	return []*core.Finding{{
 		Severity:     core.SeverityMedium,
 		Category:     "image",
@@ -141,22 +148,35 @@ func checkUntrustedRegistry(image, containerName, rt, rn, ns string) []*core.Fin
 		}
 	}
 
-	// Docker Hub official image (no host component)
-	if !strings.Contains(strings.SplitN(imgLower, "/", 2)[0], ".") {
-		for _, prefix := range dockerHubOfficialPrefixes {
-			if strings.HasPrefix(imgLower, prefix) {
-				return nil
-			}
-		}
-		// docker.io implicit — single component or user/image format without a dot
+	// Images with no "/" are always Docker Hub library images (e.g. "nginx:1.25.3", "alpine:3.18").
+	// The old check used strings.Contains(first, ".") which incorrectly treated version
+	// tags like "1.25.3" as dots in a hostname. Strip the tag before dot-checking.
+	if !strings.Contains(imgLower, "/") {
 		return nil
 	}
 
-	// Image has a hostname-like prefix (contains dot before first slash) — check if trusted
+	// Image has a slash — first component may be a registry hostname.
+	// A real registry hostname contains a "." (e.g. "myregistry.example.com") or looks
+	// like "host:port" where port is all digits (e.g. "localhost:5000").
+	// Docker Hub org images ("bitnami/redis", "grafana/grafana") have no dot in the org name.
 	parts := strings.SplitN(imgLower, "/", 2)
 	host := parts[0]
-	if !strings.Contains(host, ".") {
-		return nil // not a hostname
+	isRegistryHost := strings.Contains(host, ".")
+	if !isRegistryHost {
+		if colonIdx := strings.LastIndex(host, ":"); colonIdx != -1 {
+			port := host[colonIdx+1:]
+			allDigits := len(port) > 0
+			for _, c := range port {
+				if c < '0' || c > '9' {
+					allDigits = false
+					break
+				}
+			}
+			isRegistryHost = allDigits // "localhost:5000" style
+		}
+	}
+	if !isRegistryHost {
+		return nil // Docker Hub org image (e.g. "bitnami/redis")
 	}
 
 	return []*core.Finding{{

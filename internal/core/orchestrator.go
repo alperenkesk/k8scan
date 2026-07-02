@@ -55,16 +55,17 @@ func RunScanners(ctx context.Context, client KubeReader, scanners []Scanner, opt
 	}
 
 	// Merge findings, deduplicate, assign sequential IDs, apply filters.
-	// Deduplication key: (title, severity, namespace, resource_name) — prevents the same
-	// security issue from appearing multiple times when multiple containers in
-	// the same workload all trigger the same check, while keeping distinct severity
-	// variants (e.g. SYS_ADMIN CRITICAL vs NET_RAW HIGH on the same workload).
+	// Deduplication key: (title, severity, namespace, resource_type, resource_name) — prevents
+	// the same security issue from appearing multiple times when multiple containers in the
+	// same workload all trigger the same check, while keeping distinct severity variants
+	// (e.g. SYS_ADMIN CRITICAL vs NET_RAW HIGH on the same workload) and keeping findings
+	// for different resource types with the same name (e.g. a Pod and a Deployment named "foo").
 	var all []*Finding
 	seen := make(map[string]struct{})
 	id := 1
 	for _, r := range results {
 		for _, f := range r.Findings {
-			key := f.Title + "\x00" + string(f.Severity) + "\x00" + f.Namespace + "\x00" + f.ResourceName
+			key := f.Title + "\x00" + string(f.Severity) + "\x00" + f.Namespace + "\x00" + f.ResourceType + "\x00" + f.ResourceName
 			if _, dup := seen[key]; dup {
 				continue
 			}

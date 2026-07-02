@@ -250,9 +250,22 @@ func matchSensitiveHostPath(path string) (struct {
 }
 
 func checkHostPaths(pod corev1.Pod, targetOS string, conf core.Confidence) []*core.Finding {
+	// Build set of volume names actually mounted in any container (init or main).
+	// Volumes defined in pod.Spec.Volumes but not referenced in any volumeMount
+	// are harmless — skip them to avoid false positives.
+	mountedVolumes := make(map[string]bool)
+	for _, c := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
+		for _, vm := range c.VolumeMounts {
+			mountedVolumes[vm.Name] = true
+		}
+	}
+
 	var findings []*core.Finding
 	for _, vol := range pod.Spec.Volumes {
 		if vol.HostPath == nil {
+			continue
+		}
+		if !mountedVolumes[vol.Name] {
 			continue
 		}
 		path := vol.HostPath.Path
@@ -497,7 +510,7 @@ func checkImageTags(pod corev1.Pod, targetOS string, conf core.Confidence) []*co
 		if !strings.Contains(image, ":") || strings.HasSuffix(image, ":latest") {
 			findings = append(findings, &core.Finding{
 				Severity:     core.SeverityInfo,
-				Category:     "image",
+				Category:     "workload",
 				Title:        "Image Using Latest Tag",
 				Description:  fmt.Sprintf("Container %s in pod %s uses :latest tag or no tag — unpredictable", c.Name, pod.Name),
 				ResourceType: "Pod",

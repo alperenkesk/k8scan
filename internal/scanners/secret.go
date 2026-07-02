@@ -92,8 +92,6 @@ var sensitiveSecretKeys = []string{
 
 var systemSecretPrefixes = []string{
 	"kubernetes.io/service-account-token",
-	"kubernetes.io/dockercfg",
-	"kubernetes.io/dockerconfigjson",
 	"bootstrap.kubernetes.io",
 }
 
@@ -113,7 +111,7 @@ func checkSecret(secret corev1.Secret) []*core.Finding {
 	ns := secret.Namespace
 	name := secret.Name
 
-	if len(secret.Data) == 0 && len(secret.StringData) == 0 {
+	if isEffectivelyEmpty(secret) {
 		findings = append(findings, &core.Finding{
 			Severity:     core.SeverityLow,
 			Category:     "secrets",
@@ -282,6 +280,20 @@ func collectSecretValues(secret corev1.Secret) []keyValue {
 		entries = append(entries, keyValue{k, v})
 	}
 	return entries
+}
+
+// isEffectivelyEmpty returns true for secrets with no data or only empty-value keys.
+// A live secret always has empty stringData (write-only field), so we only inspect Data.
+func isEffectivelyEmpty(secret corev1.Secret) bool {
+	if len(secret.StringData) > 0 {
+		return false
+	}
+	for _, v := range secret.Data {
+		if len(v) > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func isSystemSecret(secret corev1.Secret) bool {
