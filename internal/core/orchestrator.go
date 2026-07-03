@@ -72,6 +72,13 @@ func RunScanners(ctx context.Context, client KubeReader, scanners []Scanner, opt
 			seen[key] = struct{}{}
 			f.FindingID = id
 			id++
+			// Default confidence to HIGH so the field is consistent across all
+			// findings. Scanners express uncertainty explicitly by setting MEDIUM/LOW
+			// (fuzzy secret matches, trusted-operator workloads, "potentially ..."
+			// heuristics); anything left unset is a deterministic detection.
+			if f.Confidence == "" {
+				f.Confidence = ConfidenceHigh
+			}
 			all = append(all, f)
 		}
 	}

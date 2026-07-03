@@ -7,12 +7,14 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/core"
 )
 
 // SuppressionRule mirrors one entry in .k8scan-ignore.yaml.
+// Both "title" (documented in README) and "finding" (legacy) name the check.
 type SuppressionRule struct {
 	Finding   string `yaml:"finding,omitempty"`
+	Title     string `yaml:"title,omitempty"`
 	Namespace string `yaml:"namespace,omitempty"`
 	Resource  string `yaml:"resource,omitempty"`
 	Category  string `yaml:"category,omitempty"`
@@ -20,8 +22,27 @@ type SuppressionRule struct {
 	Reason    string `yaml:"reason,omitempty"`
 }
 
+// titleMatch returns the finding-title criterion, preferring the documented
+// "title" key and falling back to the legacy "finding" key.
+func (r SuppressionRule) titleMatch() string {
+	if r.Title != "" {
+		return r.Title
+	}
+	return r.Finding
+}
+
+// isEmpty reports whether the rule has no criteria at all. Such a rule would
+// otherwise match — and silently suppress — every finding, so it is ignored.
+func (r SuppressionRule) isEmpty() bool {
+	return r.titleMatch() == "" && r.Namespace == "" && r.Resource == "" &&
+		r.Category == "" && r.Severity == ""
+}
+
+// ignoreFile accepts both the documented top-level key "rules" and the legacy
+// "suppress" so files written against either the README or older versions work.
 type ignoreFile struct {
 	Suppress []SuppressionRule `yaml:"suppress"`
+	Rules    []SuppressionRule `yaml:"rules"`
 }
 
 // SuppressionManager reads .k8scan-ignore.yaml and filters findings.
@@ -43,7 +64,15 @@ func NewSuppressionManager(path string) (*SuppressionManager, error) {
 	if err := yaml.Unmarshal(data, &f); err != nil {
 		return nil, err
 	}
-	return &SuppressionManager{rules: f.Suppress}, nil
+	// Merge both accepted top-level keys and drop no-criteria rules that would
+	// otherwise suppress every finding.
+	var rules []SuppressionRule
+	for _, r := range append(f.Suppress, f.Rules...) {
+		if !r.isEmpty() {
+			rules = append(rules, r)
+		}
+	}
+	return &SuppressionManager{rules: rules}, nil
 }
 
 // ActiveRuleCount returns how many rules were loaded.
@@ -54,7 +83,7 @@ func (sm *SuppressionManager) ActiveRuleCount() int {
 // IsSuppressed returns true if the finding matches any suppression rule.
 func (sm *SuppressionManager) IsSuppressed(f *core.Finding) bool {
 	for _, r := range sm.rules {
-		if r.Finding != "" && r.Finding != f.Title {
+		if t := r.titleMatch(); t != "" && t != f.Title {
 			continue
 		}
 		if r.Namespace != "" && r.Namespace != f.Namespace {

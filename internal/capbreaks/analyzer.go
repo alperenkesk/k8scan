@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/core"
 	"k8s.io/client-go/kubernetes"
 )
 

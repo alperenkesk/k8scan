@@ -3,7 +3,7 @@ package capbreaks
 import (
 	"fmt"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/core"
 )
 
 // buildValidationProof constructs a deterministic, explainable proof of why
@@ -128,7 +128,21 @@ func buildVerdict(cbID string, signals []core.ProofSignal) (verdict, combined st
 			"The multi-tenant isolation model is violated — Tenant A workloads can interact " +
 			"with Tenant B resources through shared infrastructure."
 	case "CB-010":
-		verdict = fmt.Sprintf("BOUNDARY BROKEN — cloud metadata API reachable from %d workload(s)", count)
+		// Mirror evalCB010's all-LOW cap: if no signal is above LOW severity the
+		// metadata path may be restricted (IMDSv2 hop-limit-1), so the boundary is
+		// degraded, not proven broken.
+		aboveLow := false
+		for _, s := range signals {
+			if s.Severity != "LOW" && s.Severity != "INFO" {
+				aboveLow = true
+				break
+			}
+		}
+		if aboveLow {
+			verdict = fmt.Sprintf("BOUNDARY BROKEN — cloud metadata API reachable from %d workload(s)", count)
+		} else {
+			verdict = fmt.Sprintf("BOUNDARY DEGRADED — cloud metadata exposure likely, but may be restricted by IMDSv2 (%d signal(s))", count)
+		}
 		combined = "Cloud provider IAM credentials are retrievable via plain HTTP from any pod " +
 			"in the affected namespaces. A cluster breach immediately extends to cloud " +
 			"infrastructure — no cloud-level exploit is required."

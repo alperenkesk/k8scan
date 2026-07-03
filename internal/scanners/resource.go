@@ -11,8 +11,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
-	"github.com/alperenkeskin/k8scan/internal/utils"
+	"github.com/alperenkesk/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/utils"
 )
 
 // ResourceScanner checks Deployments, StatefulSets, and DaemonSets.
@@ -271,11 +271,11 @@ func checkWorkloadContainers(spec corev1.PodSpec, rt, rn, ns string) []*core.Fin
 		}
 	}
 
-	// Pod-level seccomp — if set to RuntimeDefault it covers all containers,
-	// so container-level checks must not flag them as "not set".
+	// Pod-level seccomp — a configured profile (RuntimeDefault or Localhost) covers
+	// all containers, so container-level checks must not flag them as "not set".
 	podSeccompOK := spec.SecurityContext != nil &&
 		spec.SecurityContext.SeccompProfile != nil &&
-		spec.SecurityContext.SeccompProfile.Type == "RuntimeDefault"
+		isConfiguredSeccompType(spec.SecurityContext.SeccompProfile.Type)
 
 	all := allTemplateContainers(spec)
 
@@ -352,7 +352,7 @@ func checkWorkloadContainers(spec corev1.PodSpec, rt, rn, ns string) []*core.Fin
 
 	// Per-container checks
 	for _, c := range all {
-		findings = append(findings, checkWorkloadContainer(c, rt, rn, ns, targetOS, podSeccompOK)...)
+		findings = append(findings, checkWorkloadContainer(c, spec.SecurityContext, rt, rn, ns, targetOS, podSeccompOK)...)
 	}
 
 	// PriorityClass and probes do not apply to ephemeral batch workloads.
@@ -398,8 +398,7 @@ func checkWorkloadContainers(spec corev1.PodSpec, rt, rn, ns string) []*core.Fin
 	return findings
 }
 
-
-func checkWorkloadContainer(c corev1.Container, rt, rn, ns, targetOS string, podSeccompOK bool) []*core.Finding {
+func checkWorkloadContainer(c corev1.Container, podSC *corev1.PodSecurityContext, rt, rn, ns, targetOS string, podSeccompOK bool) []*core.Finding {
 	var findings []*core.Finding
 
 	// Privileged
@@ -476,7 +475,7 @@ func checkWorkloadContainer(c corev1.Container, rt, rn, ns, targetOS string, pod
 			Metadata:    map[string]any{"container": c.Name},
 		})
 	} else {
-		if c.SecurityContext.RunAsNonRoot == nil || !*c.SecurityContext.RunAsNonRoot {
+		if !guaranteedNonRootCtx(podSC, c.SecurityContext) {
 			findings = append(findings, &core.Finding{
 				Severity:     core.SeverityMedium,
 				Category:     "container",
@@ -515,7 +514,7 @@ func checkWorkloadContainer(c corev1.Container, rt, rn, ns, targetOS string, pod
 	// which applies to all containers and prevents false positives here.
 	if targetOS != "windows" && !podSeccompOK {
 		if c.SecurityContext == nil || c.SecurityContext.SeccompProfile == nil ||
-			c.SecurityContext.SeccompProfile.Type != "RuntimeDefault" {
+			!isConfiguredSeccompType(c.SecurityContext.SeccompProfile.Type) {
 			findings = append(findings, &core.Finding{
 				Severity:     core.SeverityLow,
 				Category:     "container",
@@ -556,9 +555,9 @@ func checkWorkloadContainer(c corev1.Container, rt, rn, ns, targetOS string, pod
 		})
 	}
 
-	// Image tag
-	isLatest := strings.HasSuffix(c.Image, ":latest") ||
-		(!strings.Contains(c.Image, ":") && !strings.Contains(c.Image, "@sha256:"))
+	// Image tag — imageHasExplicitTag ignores the ":" in a registry host:port
+	// prefix so an untagged "myreg:5000/app" is still treated as latest.
+	isLatest := strings.HasSuffix(c.Image, ":latest") || !imageHasExplicitTag(c.Image)
 	if isLatest {
 		findings = append(findings, &core.Finding{
 			Severity:     core.SeverityInfo,

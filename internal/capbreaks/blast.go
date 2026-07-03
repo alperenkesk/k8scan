@@ -3,7 +3,7 @@ package capbreaks
 import (
 	"context"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/core"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )

@@ -12,14 +12,14 @@ import (
 	"github.com/pterm/pterm"
 	"github.com/spf13/cobra"
 
-	"github.com/alperenkeskin/k8scan/internal/capbreaks"
-	"github.com/alperenkeskin/k8scan/internal/compliance"
-	"github.com/alperenkeskin/k8scan/internal/core"
-	"github.com/alperenkeskin/k8scan/internal/exploits"
-	"github.com/alperenkeskin/k8scan/internal/lint"
-	"github.com/alperenkeskin/k8scan/internal/report"
-	"github.com/alperenkeskin/k8scan/internal/scanners"
-	"github.com/alperenkeskin/k8scan/internal/utils"
+	"github.com/alperenkesk/k8scan/internal/capbreaks"
+	"github.com/alperenkesk/k8scan/internal/compliance"
+	"github.com/alperenkesk/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/exploits"
+	"github.com/alperenkesk/k8scan/internal/lint"
+	"github.com/alperenkesk/k8scan/internal/report"
+	"github.com/alperenkesk/k8scan/internal/scanners"
+	"github.com/alperenkesk/k8scan/internal/utils"
 )
 
 // version is set at build time via:
@@ -650,6 +650,7 @@ type lintFlags struct {
 	noExploits  bool
 	cisReport   bool
 	recursive   bool
+	ignoreFile  string
 }
 
 func lintCmd() *cobra.Command {
@@ -684,6 +685,7 @@ Examples:
 	cmd.Flags().StringVar(&flags.failOn, "fail-on", "", "Exit with code 2 if findings at this severity or above exist")
 	cmd.Flags().BoolVar(&flags.noExploits, "no-exploits", false, "Skip PoC/exploitation enrichment")
 	cmd.Flags().BoolVar(&flags.cisReport, "cis-report", false, "Print CIS Benchmark compliance summary")
+	cmd.Flags().StringVar(&flags.ignoreFile, "ignore-file", ".k8scan-ignore.yaml", "Suppression rules file")
 
 	return cmd
 }
@@ -765,6 +767,15 @@ func runLint(flags lintFlags, args []string) error {
 	if len(cbResult.CapabilityBreaks) > 0 {
 		pterm.Warning.Printf("Capability break analysis: %d break(s) detected, %d compound path(s)\n",
 			len(cbResult.CapabilityBreaks), len(cbResult.CompoundBreaks))
+	}
+
+	// Apply suppression rules (same .k8scan-ignore.yaml format as scan mode) after
+	// chain analysis so suppressed findings don't distort CB detection.
+	if sm, err := utils.NewSuppressionManager(flags.ignoreFile); err == nil {
+		if sm.ActiveRuleCount() > 0 {
+			pterm.Info.Printf("Loaded %d suppression rule(s) from %s\n", sm.ActiveRuleCount(), flags.ignoreFile)
+		}
+		findings = sm.Filter(findings)
 	}
 
 	// Print

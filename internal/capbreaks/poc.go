@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/core"
 )
 
 // buildPoC generates validation commands that confirm the vulnerability exists.
@@ -48,6 +48,34 @@ func firstPod(evidence []core.CBEvidence) (pod, ns string) {
 	return "<pod-name>", "<namespace>"
 }
 
+// containerRef returns a kubectl-compatible "kind/name" reference and namespace
+// flag for the workload or pod that produced the evidence. Using the real kind
+// means `kubectl get`/`kubectl exec` resolve correctly even when the finding is
+// reported against a Deployment/StatefulSet/DaemonSet rather than a bare Pod.
+// PoCs pair this with the recursive-descent jsonpath ".." so the same query works
+// whether containers live at .spec (Pod) or .spec.template.spec (workload).
+func containerRef(evidence []core.CBEvidence) (ref, nsFlag string) {
+	for _, e := range evidence {
+		if e.ResourceName == "" {
+			continue
+		}
+		if e.Namespace != "" {
+			nsFlag = " -n " + e.Namespace
+		}
+		kind := "pod"
+		switch e.ResourceType {
+		case "Deployment":
+			kind = "deployment"
+		case "StatefulSet":
+			kind = "statefulset"
+		case "DaemonSet":
+			kind = "daemonset"
+		}
+		return kind + "/" + e.ResourceName, nsFlag
+	}
+	return "pod/<pod-name>", ""
+}
+
 func allAffected(evidence []core.CBEvidence) string {
 	nsSet := make(map[string]bool)
 	var pods []string
@@ -82,20 +110,16 @@ func keys(m map[string]bool) []string {
 // ── CB-001: Container Isolation Failure ──────────────────────
 
 func pocCB001(evidence []core.CBEvidence) string {
-	pod, ns := firstPod(evidence)
-	nsFlag := ""
-	if ns != "" && ns != "<namespace>" {
-		nsFlag = " -n " + ns
-	}
+	ref, nsFlag := containerRef(evidence)
 	return fmt.Sprintf(`# CB-001 — Container Isolation Failure
 # Vulnerability Validation — Confirm isolation boundary is breakable
 # Purpose: Verify misconfiguration exists. Does NOT exploit.
 
 # Check 1: Confirm privileged flag or dangerous capabilities
-kubectl get pod %s%s -o jsonpath='{.spec.containers[*].securityContext}' | jq .
+kubectl get %s%s -o jsonpath='{..securityContext}' | jq .
 
 # Check 2: Verify host namespace sharing
-kubectl get pod %s%s -o jsonpath='{.spec.hostPID} {.spec.hostNetwork} {.spec.hostIPC}'
+kubectl get %s%s -o jsonpath='{..hostPID} {..hostNetwork} {..hostIPC}'
 # BOUNDARY BREAKABLE if any field = "true"
 
 # Check 3: Non-destructive isolation boundary test
@@ -104,12 +128,12 @@ kubectl exec %s%s -- ls /proc/1/root/ 2>/dev/null \
   || echo "RESULT: ISOLATED — /proc/1/root not reachable"
 
 # Check 4: Enumerate dangerous volume mounts
-kubectl get pod %s%s -o jsonpath='{.spec.volumes[*]}' | jq .
+kubectl get %s%s -o jsonpath='{..volumes[*]}' | jq .
 
 %s
 
 # CONFIRMED if: privileged=true OR hostPID/hostNetwork=true OR /proc/1/root accessible
-# IMPACT: Any code in this container can reach node-level resources without kernel exploit`, pod, nsFlag, pod, nsFlag, pod, nsFlag, pod, nsFlag, allAffected(evidence))
+# IMPACT: Any code in this container can reach node-level resources without kernel exploit`, ref, nsFlag, ref, nsFlag, ref, nsFlag, ref, nsFlag, allAffected(evidence))
 }
 
 // ── CB-002: Namespace Isolation Failure ──────────────────────
@@ -271,18 +295,14 @@ kubectl get namespaces -o json | \
 // ── CB-006: Node Trust Failure ────────────────────────────────
 
 func pocCB006(evidence []core.CBEvidence) string {
-	pod, ns := firstPod(evidence)
-	nsFlag := ""
-	if ns != "" {
-		nsFlag = " -n " + ns
-	}
+	ref, nsFlag := containerRef(evidence)
 	return fmt.Sprintf(`# CB-006 — Node Trust Failure
 # Vulnerability Validation — Confirm container runtime socket is accessible
 # Purpose: Verify socket mount exists. Does NOT spawn containers.
 
 # Check 1: Verify docker/containerd socket mount in pod spec
-kubectl get pod %s%s -o jsonpath='{.spec.volumes}' | \
-  jq '.[] | select(.hostPath.path | test("docker.sock|containerd.sock|cri.sock"))'
+kubectl get %s%s -o jsonpath='{..volumes}' | \
+  jq '.[]? | select(.hostPath.path | test("docker.sock|containerd.sock|cri.sock"))'
 # VULNERABLE if any matching volume is found
 
 # Check 2: Confirm socket is accessible from inside the container
@@ -303,7 +323,7 @@ kubectl exec %s%s -- sh -c \
 %s
 
 # CONFIRMED if: socket file accessible AND API query succeeds
-# IMPACT: Socket access enables spawning privileged containers via CRI, bypassing Kubernetes RBAC entirely`, pod, nsFlag, pod, nsFlag, pod, nsFlag, pod, nsFlag, allAffected(evidence))
+# IMPACT: Socket access enables spawning privileged containers via CRI, bypassing Kubernetes RBAC entirely`, ref, nsFlag, ref, nsFlag, ref, nsFlag, ref, nsFlag, allAffected(evidence))
 }
 
 // ── CB-007: Secret Exposure Chain Failure ────────────────────
@@ -349,34 +369,32 @@ kubectl exec %s%s -- find /var/run/secrets /etc/secrets -maxdepth 2 -type f 2>/d
 // ── CB-008: CI/CD Trust Failure ───────────────────────────────
 
 func pocCB008(evidence []core.CBEvidence) string {
-	pod, ns := firstPod(evidence)
-	return fmt.Sprintf(`# CB-008 — CI/CD Trust Failure
-# Vulnerability Validation — Confirm pipeline has excessive cluster write access
-# Purpose: Check permission scope. Does NOT deploy or modify workloads.
+	ref, nsFlag := containerRef(evidence)
+	return fmt.Sprintf(`# CB-008 — Supply Chain & CI/CD Trust Failure
+# Vulnerability Validation — Confirm workload runs an image of untrusted provenance
+# Purpose: Verify image source and identity exposure. Read-only.
 
-# Check 1: Identify CI/CD service accounts and their cluster permissions
-kubectl get serviceaccounts -A | grep -iE 'argocd|flux|gitops|deploy|cd|ci'
+# Check 1: List the image references this workload pulls
+kubectl get %s%s -o jsonpath='{..image}' | tr ' ' '\n' | sort -u
+# VULNERABLE if any image is from an unknown registry (not docker.io/gcr.io/ghcr.io/quay.io/ECR/ACR/AR)
+# and is NOT pinned to an @sha256: digest
 
-# Check 2: Check ArgoCD/Flux SA cluster-write permissions
-kubectl auth can-i create pods \
-  --as=system:serviceaccount:%s:%s
-kubectl auth can-i create deployments \
-  --as=system:serviceaccount:%s:%s
-# VULNERABLE if either returns "yes"
+# Check 2: Confirm the image is tag-pinned (mutable) rather than digest-pinned
+kubectl get %s%s -o jsonpath='{..image}' | tr ' ' '\n' | grep -v '@sha256:' || echo "all images digest-pinned"
 
-# Check 3: Check for cluster-admin or edit ClusterRoleBinding
-kubectl get clusterrolebindings -o json | \
-  jq '.items[] | select(.subjects[]? | .namespace == "%s") |
-      {name:.metadata.name, role:.roleRef.name}'
+# Check 3: Is image signature verification enforced by admission control?
+kubectl get validatingwebhookconfigurations -o json | \
+  jq -r '.items[].webhooks[]?.name' | grep -iE 'cosign|sigstore|notary|kyverno|ratify' \
+  || echo "NO image-signature admission policy found (VULNERABLE)"
 
-# Check 4: Check ArgoCD sync scope (cluster-wide vs namespaced)
-kubectl get applications -n argocd -o json 2>/dev/null | \
-  jq '.items[] | {name:.metadata.name, dest:.spec.destination}' | head -20
+# Check 4: If the workload also has API access, a poisoned image inherits it
+kubectl get %s%s -o jsonpath='{..serviceAccountName}'
+# Cross-reference the SA's permissions (see CB-004) — poisoned code runs with them
 
 %s
 
-# CONFIRMED if: pipeline SA has pod/deployment create OR cluster-admin binding
-# IMPACT: Supply chain attack on repository/pipeline → direct cluster write access`, ns, pod, ns, pod, ns, allAffected(evidence))
+# CONFIRMED if: untrusted-registry image AND no signature-verification admission policy
+# IMPACT: A poisoned image at that registry executes with the workload's identity — supply-chain foothold`, ref, nsFlag, ref, nsFlag, ref, nsFlag, allAffected(evidence))
 }
 
 // ── CB-009: Multi-Tenant Isolation Failure ────────────────────

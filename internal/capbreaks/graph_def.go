@@ -3,7 +3,7 @@ package capbreaks
 import (
 	"encoding/json"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/core"
 )
 
 // graphPayload is the JSON structure consumed by the canvas renderer.
@@ -133,13 +133,15 @@ func BuildCBGraphJSON(cbID string, evidence []core.CBEvidence) string {
 	case "CB-008":
 		gd = graphPayload{
 			Nodes: []graphNode{
-				{ID: "pipeline", Label: "CI/CD Pipeline\n(ArgoCD / Flux)", Type: "workload"},
-				{ID: "token", Label: "Deploy Token\n(long-lived SA)", Type: "identity"},
-				{ID: "cluster", Label: "K8s Cluster\n[TARGET]", Type: "target"},
+				{ID: "workload", Label: resourceLabel + "\n(runs untrusted image)", Type: "workload"},
+				{ID: "registry", Label: "Untrusted Registry\n(unknown provenance)", Type: "cloud"},
+				{ID: "image", Label: "Poisoned Image Layer\n(supply-chain payload)", Type: "workload"},
+				{ID: "cluster", Label: "Workload Identity\n+ Cluster Foothold\n[TARGET]", Type: "target"},
 			},
 			Edges: []graphEdge{
-				{From: "pipeline", To: "token", Label: "token in pipeline", Style: "steal"},
-				{From: "token", To: "cluster", Label: "deploy malicious workload", Style: "compromise"},
+				{From: "workload", To: "registry", Label: "pulls image", Style: "access"},
+				{From: "registry", To: "image", Label: "malicious image push", Style: "steal"},
+				{From: "image", To: "cluster", Label: "executes with SA token", Style: "compromise"},
 			},
 		}
 	case "CB-009":
@@ -297,15 +299,15 @@ func BuildCompoundGraphJSON(compoundID string, cbs []core.CapabilityBreak) strin
 	case "COMPOUND-7": // CB-008 + CB-004
 		return marshalGraph(graphPayload{
 			Nodes: []graphNode{
-				{ID: "scm", Label: "SCM / Pipeline\n(GitHub / GitLab)", Type: "workload"},
-				{ID: "pipeline", Label: "CI/CD Pipeline\n(CB-008)", Type: "workload"},
-				{ID: "token", Label: "SA Deploy Token\n(CB-004)", Type: "identity"},
+				{ID: "image", Label: "Untrusted Image\n(CB-008: supply chain)", Type: "workload"},
+				{ID: "workload", Label: firstLabel + "\n(runs the image)", Type: "workload"},
+				{ID: "token", Label: "Over-Permissioned SA\n(CB-004)", Type: "identity"},
 				{ID: "cluster", Label: "K8s Cluster\n[SUPPLY CHAIN TARGET]", Type: "target"},
 			},
 			Edges: []graphEdge{
-				{From: "scm", To: "pipeline", Label: "compromise pipeline", Style: "access"},
-				{From: "pipeline", To: "token", Label: "CB-008: steal token", Style: "steal"},
-				{From: "token", To: "cluster", Label: "CB-004: deploy malicious", Style: "compromise"},
+				{From: "image", To: "workload", Label: "CB-008: poisoned image runs", Style: "access"},
+				{From: "workload", To: "token", Label: "reads mounted SA token", Style: "steal"},
+				{From: "token", To: "cluster", Label: "CB-004: excessive RBAC", Style: "compromise"},
 			},
 		})
 	case "COMPOUND-8": // CB-009 + CB-002

@@ -2,7 +2,7 @@
 // Each finding title is mapped to the CIS control ID, level, profile, and description.
 package compliance
 
-import "github.com/alperenkeskin/k8scan/internal/core"
+import "github.com/alperenkesk/k8scan/internal/core"
 
 // CISEntry holds the CIS Benchmark metadata for a single finding title.
 type CISEntry struct {
@@ -83,8 +83,8 @@ var cisMapping = map[string]CISEntry{
 		"Ensure that the cluster-admin role is only used where required",
 	},
 	"Anonymous User Granted Permissions": {
-		"5.1.2", 1, "RBAC",
-		"Minimize access to secrets",
+		"5.1.1", 1, "RBAC",
+		"Ensure that the cluster-admin role is only used where required",
 	},
 	"Wildcard Permissions Granted": {
 		"5.1.3", 1, "RBAC",
@@ -119,8 +119,8 @@ var cisMapping = map[string]CISEntry{
 		"Ensure that the cluster-admin role is only used where required",
 	},
 	"Cross-Namespace ServiceAccount Binding": {
-		"5.1.6", 1, "RBAC",
-		"Ensure that Service Account Tokens are not automatically mounted",
+		"5.1.1", 1, "RBAC",
+		"Ensure that the cluster-admin role is only used where required",
 	},
 
 	// ─── RBAC — Faz 1 new checks ─────────────────────────────────────────────

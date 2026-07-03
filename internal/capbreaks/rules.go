@@ -4,7 +4,7 @@ import (
 	"math"
 	"strings"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/core"
 )
 
 // ── Signal matching primitives ────────────────────────────────
@@ -27,13 +27,46 @@ func matchSignals(findings []*core.Finding, signals []signalDef) []matchedSignal
 	for _, f := range findings {
 		combined := strings.ToLower(f.Title + " " + f.Category)
 		for _, sig := range signals {
-			if strings.Contains(combined, sig.keyword) {
+			if containsKeyword(combined, sig.keyword) {
 				matched = append(matched, matchedSignal{def: sig, finding: f})
 				break // one match per finding
 			}
 		}
 	}
 	return matched
+}
+
+// containsKeyword reports whether keyword occurs in haystack bounded by
+// non-word characters on both sides. This is a word/phrase match, not a raw
+// substring match: it prevents short keywords from matching inside larger words
+// (e.g. "exec" must not match "execution", "opa" must not match "propagation").
+// haystack is expected to be lower-cased already.
+func containsKeyword(haystack, keyword string) bool {
+	if keyword == "" {
+		return false
+	}
+	from := 0
+	for {
+		i := strings.Index(haystack[from:], keyword)
+		if i < 0 {
+			return false
+		}
+		start := from + i
+		end := start + len(keyword)
+		beforeOK := start == 0 || !isWordByte(haystack[start-1])
+		afterOK := end == len(haystack) || !isWordByte(haystack[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		from = start + 1
+	}
+}
+
+// isWordByte reports whether b is an alphanumeric ASCII character. Underscores
+// and punctuation count as boundaries so keywords like "sys_admin" or
+// "docker.sock" still match at their natural edges.
+func isWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9')
 }
 
 // confidenceFromSignals converts total signal weight to a 0–100 confidence score.
@@ -61,6 +94,7 @@ func toEvidence(matched []matchedSignal) []core.CBEvidence {
 		ev = append(ev, core.CBEvidence{
 			FindingID:    m.finding.FindingID,
 			Title:        m.finding.Title,
+			ResourceType: m.finding.ResourceType,
 			ResourceName: m.finding.ResourceName,
 			Namespace:    m.finding.Namespace,
 			Severity:     string(m.finding.Severity),
@@ -382,6 +416,7 @@ var cb007Signals = []signalDef{
 	{keyword: "secret in environment", weight: 0.85, significance: "Secret value exposed as env var — readable from process list, container inspect, or crash dumps"},
 	{keyword: "sensitive environment", weight: 0.85, significance: "Sensitive data in environment variables is visible to all processes in the container"},
 	{keyword: "secret exposed", weight: 0.9, significance: "Secret value directly accessible without additional exploitation steps"},
+	{keyword: "secrets read", weight: 0.85, significance: "RBAC grants read access to secret values — credentials exfiltrable via API without pod exec (matches 'Secrets Read Access Granted')"},
 	{keyword: "secrets list", weight: 0.85, significance: "RBAC allows listing secrets — attacker can enumerate all credential names in namespace or cluster"},
 	{keyword: "list secrets", weight: 0.85, significance: "RBAC allows listing secrets — attacker can enumerate all credentials in namespace or cluster"},
 	{keyword: "list/watch access", weight: 0.8, significance: "List/Watch RBAC on secrets enables continuous credential monitoring by a compromised workload"},
@@ -418,6 +453,13 @@ func evalCB007(findings []*core.Finding) ([]matchedSignal, *core.CapabilityBreak
 // ── CB-008: CI/CD Trust Failure ───────────────────────────────
 
 var cb008Signals = []signalDef{
+	// Live signal — pulling from an unknown registry is a concrete supply-chain
+	// injection vector and is rare enough to be a meaningful boundary signal.
+	// NOTE: digest-pinning ("Image Not Pinned to Digest") is deliberately NOT a
+	// signal here — it fires on almost every tagged image, so accumulating it
+	// across workloads would falsely trip this break on healthy clusters.
+	{keyword: "untrusted registry", weight: 0.75, significance: "Image pulled from an unknown registry — a poisoned image at that registry executes with the workload's identity (supply-chain injection)"},
+	// Aspirational signals — match if a scanner emits CI/CD pipeline findings.
 	{keyword: "argocd", weight: 0.9, significance: "ArgoCD SA typically has cluster-wide deploy permissions — compromise enables arbitrary workload injection"},
 	{keyword: "argo cd", weight: 0.9, significance: "ArgoCD SA typically has cluster-wide deploy permissions — compromise enables arbitrary workload injection"},
 	{keyword: "flux", weight: 0.85, significance: "Flux controller SA has write access to all managed namespaces — supply chain entry point"},
@@ -439,16 +481,16 @@ func evalCB008(findings []*core.Finding) ([]matchedSignal, *core.CapabilityBreak
 	status := statusFromConfidence(conf)
 	exploit := exploitFromMatched(matched)
 	return matched, &core.CapabilityBreak{
-		ID: "CB-008", Name: "CI/CD Trust Failure",
+		ID: "CB-008", Name: "Supply Chain & CI/CD Trust Failure",
 		Boundary: "L3 — Control Plane Boundary", Layer: "L3",
 		Status: status, Confidence: conf, Exploitability: exploit,
 		Evidence: ev,
 		AttackGraph: core.CBAttackGraph{
-			Path:        []string{"Compromised CI/CD pipeline (ArgoCD / Flux / GitHub Actions)", "→ Stolen deployment token or registry credential", "→ Deploy malicious workload", "→ Cluster takeover"},
-			Description: "Deployment pipelines carry cluster-level credentials, making them high-value entry points for supply chain attacks.",
+			Path:        []string{"Untrusted / poisoned image (or compromised CI/CD pipeline)", "→ Workload runs unverified code", "→ Code abuses the workload's mounted SA token / pipeline credentials", "→ Cluster takeover"},
+			Description: "Workloads run images from untrusted registries — or are deployed by pipelines carrying cluster credentials — giving a supply-chain foothold that executes with the workload's identity.",
 		},
-		Impact:      []string{"supply chain compromise", "cluster takeover via pipeline", "malicious image injection"},
-		Remediation: "Restrict ArgoCD/Flux RBAC to minimum required namespaces. Rotate pipeline tokens. Use OIDC workload identity instead of long-lived tokens. Sign container images (Cosign/Sigstore).",
+		Impact:      []string{"supply chain compromise", "malicious image injection", "cluster takeover via workload identity"},
+		Remediation: "Pull images only from trusted registries and pin to digests; sign and verify images (Cosign/Sigstore) via an admission policy. Restrict ArgoCD/Flux RBAC to minimum namespaces and use short-lived OIDC workload identity instead of long-lived tokens.",
 		FixPriority: fixPriority(status, exploit),
 		MITRE:       mitreCB008,
 	}
@@ -457,6 +499,10 @@ func evalCB008(findings []*core.Finding) ([]matchedSignal, *core.CapabilityBreak
 // ── CB-009: Multi-Tenant Isolation Failure ────────────────────
 
 var cb009Signals = []signalDef{
+	// Live signals — match real scanner finding titles that prove tenant bleed-through.
+	{keyword: "cross-namespace", weight: 0.8, significance: "Cross-namespace ServiceAccount binding or ingress bridges tenant boundaries — a workload in Tenant A can act on or reach Tenant B"},
+	{keyword: "cross-namespace network", weight: 0.8, significance: "Missing cross-namespace network isolation lets any namespace reach this one — no tenant segmentation at the network layer"},
+	// Aspirational signals (match if a future scanner emits these phrasings).
 	{keyword: "shared service account", weight: 0.85, significance: "Shared SA identity bridges tenant boundaries — Tenant A can act as Tenant B"},
 	{keyword: "shared controller", weight: 0.8, significance: "Shared operator/controller with cross-namespace access collapses tenant isolation"},
 	{keyword: "cluster-scoped", weight: 0.75, significance: "Cluster-scoped permission granted to tenant workload — breaks intended tenant boundary"},

@@ -8,8 +8,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
-	"github.com/alperenkeskin/k8scan/internal/utils"
+	"github.com/alperenkesk/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/utils"
 )
 
 // NetworkScanner checks NetworkPolicies, Services, and Ingress resources.
@@ -550,7 +550,10 @@ func checkIngress(ing networkingv1.Ingress) []*core.Finding {
 	annotations := ing.Annotations
 
 	hasTLS := len(ing.Spec.TLS) > 0
-	if !hasTLS {
+	if !hasTLS && hasUpstreamTLS(annotations) {
+		// TLS is terminated at the cloud load balancer (ALB/NLB/GCP) via annotation
+		// rather than in spec.tls — not a plaintext exposure. Skip to avoid a false positive.
+	} else if !hasTLS {
 		findings = append(findings, &core.Finding{
 			Severity:     core.SeverityMedium,
 			Category:     "network",
@@ -626,6 +629,27 @@ func ingressRulesWithoutTLS(ing networkingv1.Ingress) []string {
 	return uncovered
 }
 
+// hasUpstreamTLS reports whether TLS is terminated at a cloud load balancer via
+// annotation (AWS ALB/NLB, GCP) rather than in spec.tls. Such Ingresses serve
+// HTTPS even with an empty spec.tls, so flagging "Missing TLS" would be a false positive.
+func hasUpstreamTLS(annotations map[string]string) bool {
+	if annotations == nil {
+		return false
+	}
+	tlsAnnotations := []string{
+		"alb.ingress.kubernetes.io/certificate-arn",             // AWS ALB
+		"service.beta.kubernetes.io/aws-load-balancer-ssl-cert", // AWS NLB/CLB
+		"ingress.gcp.kubernetes.io/pre-shared-cert",             // GCP pre-shared cert
+		"networking.gke.io/managed-certificates",                // GKE managed certs
+	}
+	for _, a := range tlsAnnotations {
+		if v, ok := annotations[a]; ok && v != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func hasAuthAnnotation(annotations map[string]string) bool {
 	if annotations == nil {
 		return false
@@ -650,7 +674,6 @@ func hasAuthAnnotation(annotations map[string]string) bool {
 func isSystemNamespace(ns string) bool {
 	return utils.IsSystemNamespace(ns)
 }
-
 
 // checkNamespaceResourceGovernance reports namespaces that have no ResourceQuota
 // (DoS risk — a runaway pod can exhaust all cluster resources) and no LimitRange
@@ -793,6 +816,24 @@ func checkEndpointSSRF(endpoints []corev1.Endpoints) []*core.Finding {
 // without any NetworkPolicy restricting ingress. These services commonly ship
 // with authentication disabled by default and are a frequent lateral-movement
 // target once an attacker has a foothold in any pod.
+// datastoreExposureSeverity scores a data-store service by how it is exposed and
+// whether the namespace has any ingress NetworkPolicy. It never asserts the store
+// is definitely unauthenticated — that is a port-based heuristic — so a ClusterIP
+// store (internal only) is capped at MEDIUM instead of the old flat CRITICAL.
+func datastoreExposureSeverity(svcType corev1.ServiceType, protected bool) core.Severity {
+	external := svcType == corev1.ServiceTypeNodePort || svcType == corev1.ServiceTypeLoadBalancer
+	switch {
+	case external && !protected:
+		return core.SeverityCritical
+	case external && protected:
+		return core.SeverityHigh
+	case !external && !protected:
+		return core.SeverityMedium // ClusterIP: internal lateral-movement risk only
+	default:
+		return core.SeverityLow
+	}
+}
+
 func checkUnauthenticatedDataStores(
 	services []corev1.Service,
 	netpols []networkingv1.NetworkPolicy,
@@ -836,23 +877,24 @@ func checkUnauthenticatedDataStores(
 				continue
 			}
 			protected := protectedNS[svc.Namespace]
-			severity := core.SeverityHigh
+			severity := datastoreExposureSeverity(svc.Spec.Type, protected)
 			desc := fmt.Sprintf(
 				"Service '%s' (namespace: %s) appears to be a Docker registry (port 5000, name contains 'registry'). "+
-					"Unauthenticated registries allow any pod to pull images and enumerate repository contents, "+
-					"which may expose secrets baked into image layers or enable image substitution attacks.",
+					"If it is unauthenticated, any pod that can reach it may pull images and enumerate repository "+
+					"contents, exposing secrets baked into image layers or enabling image substitution. k8scan does "+
+					"not verify the registry's auth configuration — treat this as a lead to investigate.",
 				svc.Name, svc.Namespace,
 			)
 			if !protected {
-				severity = core.SeverityCritical
-				desc += " No NetworkPolicy is active in this namespace."
+				desc += " No ingress NetworkPolicy is active in this namespace, so any pod in the cluster can reach it."
 			}
 			svcFQDN := fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace)
 			findings = append(findings, &core.Finding{
 				Severity:     severity,
 				Category:     "network",
-				Title:        "Unauthenticated Container Registry Exposed",
+				Title:        "Potentially Unauthenticated Container Registry Exposed",
 				Description:  desc,
+				Confidence:   core.ConfidenceLow,
 				ResourceType: "Service",
 				ResourceName: svc.Name,
 				Namespace:    svc.Namespace,
@@ -880,22 +922,23 @@ func checkUnauthenticatedDataStores(
 					continue
 				}
 				protected := protectedNS[svc.Namespace]
-				severity := core.SeverityHigh
+				severity := datastoreExposureSeverity(svc.Spec.Type, protected)
 				desc := fmt.Sprintf(
-					"Service '%s' (namespace: %s) exposes %s on port %d with no NetworkPolicy restricting ingress. "+
-						"%s commonly ships with authentication disabled — any pod in the cluster can connect and read data.",
+					"Service '%s' (namespace: %s) exposes %s on port %d. %s commonly ships with authentication "+
+						"disabled — if it is unauthenticated, any pod that can reach this service can read or modify "+
+						"its data. k8scan does not verify the auth configuration; treat this as a lead to investigate.",
 					svc.Name, svc.Namespace, store.name, store.port, store.name,
 				)
 				if !protected {
-					severity = core.SeverityCritical
-					desc += " No NetworkPolicy is active in this namespace."
+					desc += " No ingress NetworkPolicy is active in this namespace, so any pod in the cluster can reach it."
 				}
 				pocCmd := strings.ReplaceAll(store.poc, "{svc}", fmt.Sprintf("%s.%s.svc.cluster.local", svc.Name, svc.Namespace))
 				findings = append(findings, &core.Finding{
 					Severity:     severity,
 					Category:     "network",
-					Title:        fmt.Sprintf("Unauthenticated %s Service Exposed", store.name),
+					Title:        fmt.Sprintf("Potentially Unauthenticated %s Service Exposed", store.name),
 					Description:  desc,
+					Confidence:   core.ConfidenceLow,
 					ResourceType: "Service",
 					ResourceName: svc.Name,
 					Namespace:    svc.Namespace,

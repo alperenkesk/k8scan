@@ -24,30 +24,30 @@ import (
 
 // ManifestStore holds all Kubernetes objects parsed from YAML manifests.
 type ManifestStore struct {
-	Nodes                 []corev1.Node
-	Pods                  []corev1.Pod
-	Secrets               []corev1.Secret
-	ConfigMaps            []corev1.ConfigMap
-	Services              []corev1.Service
-	Namespaces            []corev1.Namespace
-	ServiceAccounts       []corev1.ServiceAccount
-	ResourceQuotas        []corev1.ResourceQuota
-	LimitRanges           []corev1.LimitRange
-	Endpoints             []corev1.Endpoints
-	Deployments           []appsv1.Deployment
-	StatefulSets          []appsv1.StatefulSet
-	DaemonSets            []appsv1.DaemonSet
-	Roles                 []rbacv1.Role
-	ClusterRoles          []rbacv1.ClusterRole
-	RoleBindings          []rbacv1.RoleBinding
-	ClusterRoleBindings   []rbacv1.ClusterRoleBinding
-	NetworkPolicies       []networkingv1.NetworkPolicy
-	Ingresses             []networkingv1.Ingress
-	CronJobs              []batchv1.CronJob
-	Jobs                  []batchv1.Job
-	ValidatingWebhooks    []admissionv1.ValidatingWebhookConfiguration
-	MutatingWebhooks      []admissionv1.MutatingWebhookConfiguration
-	PodDisruptionBudgets  []policyv1.PodDisruptionBudget
+	Nodes                    []corev1.Node
+	Pods                     []corev1.Pod
+	Secrets                  []corev1.Secret
+	ConfigMaps               []corev1.ConfigMap
+	Services                 []corev1.Service
+	Namespaces               []corev1.Namespace
+	ServiceAccounts          []corev1.ServiceAccount
+	ResourceQuotas           []corev1.ResourceQuota
+	LimitRanges              []corev1.LimitRange
+	Endpoints                []corev1.Endpoints
+	Deployments              []appsv1.Deployment
+	StatefulSets             []appsv1.StatefulSet
+	DaemonSets               []appsv1.DaemonSet
+	Roles                    []rbacv1.Role
+	ClusterRoles             []rbacv1.ClusterRole
+	RoleBindings             []rbacv1.RoleBinding
+	ClusterRoleBindings      []rbacv1.ClusterRoleBinding
+	NetworkPolicies          []networkingv1.NetworkPolicy
+	Ingresses                []networkingv1.Ingress
+	CronJobs                 []batchv1.CronJob
+	Jobs                     []batchv1.Job
+	ValidatingWebhooks       []admissionv1.ValidatingWebhookConfiguration
+	MutatingWebhooks         []admissionv1.MutatingWebhookConfiguration
+	PodDisruptionBudgets     []policyv1.PodDisruptionBudget
 	HorizontalPodAutoscalers []autoscalingv2.HorizontalPodAutoscaler
 	// SourceMap records which file each object came from (keyed by kind/namespace/name).
 	SourceMap map[string]sourceRef
@@ -92,7 +92,6 @@ func LoadStdin() (*ManifestStore, error) {
 	return store, nil
 }
 
-
 func (s *ManifestStore) loadPath(p string) error {
 	info, err := os.Stat(p)
 	if err != nil {
@@ -126,21 +125,48 @@ func (s *ManifestStore) loadPath(p string) error {
 }
 
 func (s *ManifestStore) parseYAML(data []byte, sourcePath string) {
-	// Split multi-document YAML on "---"
-	docs := bytes.Split(data, []byte("\n---"))
-	lineOffset := 1
-	for _, doc := range docs {
-		doc = bytes.TrimSpace(doc)
-		if len(doc) == 0 {
-			lineOffset += bytes.Count(doc, []byte("\n")) + 1
-			continue
+	// Split multi-document YAML on "\n---" but derive each document's line number
+	// from its absolute byte offset in the original data. Counting within the
+	// (trimmed) document instead — as the previous implementation did — accumulates
+	// drift so later documents report increasingly wrong line numbers.
+	sep := []byte("\n---")
+	pos := 0
+	for pos <= len(data) {
+		end := len(data)
+		rel := bytes.Index(data[pos:], sep)
+		if rel >= 0 {
+			end = pos + rel
 		}
-		obj, _, err := decoder.Decode(doc, nil, nil)
-		if err == nil {
-			s.store(obj, sourcePath, lineOffset)
+		seg := data[pos:end]
+		trimmed := bytes.TrimSpace(seg)
+		if len(trimmed) > 0 {
+			// Report the first non-blank content line, skipping a leading "---"
+			// document-start marker if present.
+			lead := firstContentOffset(seg)
+			line := 1 + bytes.Count(data[:pos+lead], []byte("\n"))
+			if obj, _, err := decoder.Decode(trimmed, nil, nil); err == nil {
+				s.store(obj, sourcePath, line)
+			}
 		}
-		lineOffset += bytes.Count(doc, []byte("\n")) + 2
+		if rel < 0 {
+			break
+		}
+		pos = end + 1 // skip the '\n'; the "---" marker begins the next segment
 	}
+}
+
+// firstContentOffset returns the byte offset within seg of the first line that
+// carries real content, skipping leading blank lines and an optional "---" marker.
+func firstContentOffset(seg []byte) int {
+	tl := bytes.TrimLeft(seg, " \t\r\n")
+	off := len(seg) - len(tl)
+	if bytes.HasPrefix(tl, []byte("---")) {
+		if nl := bytes.IndexByte(tl, '\n'); nl >= 0 {
+			rest := tl[nl+1:]
+			off += nl + 1 + (len(rest) - len(bytes.TrimLeft(rest, " \t\r\n")))
+		}
+	}
+	return off
 }
 
 func (s *ManifestStore) store(obj runtime.Object, file string, line int) {

@@ -13,8 +13,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
-	"github.com/alperenkeskin/k8scan/internal/utils"
+	"github.com/alperenkesk/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/utils"
 )
 
 // SecretScanner scans Kubernetes Secret objects for weak/exposed credentials.

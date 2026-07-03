@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alperenkeskin/k8scan/internal/compliance"
-	"github.com/alperenkeskin/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/compliance"
+	"github.com/alperenkesk/k8scan/internal/core"
 )
 
 // ─── Shared metadata ──────────────────────────────────────────────────────────
@@ -90,21 +90,21 @@ func WriteJSON(findings []*core.Finding, cbResult core.CBAnalysisResult, meta Re
 		Severity     string `json:"severity"`
 	}
 	type jsonCB struct {
-		ID             string              `json:"id"`
-		Name           string              `json:"name"`
-		Boundary       string              `json:"boundary"`
-		Status         string              `json:"status"`
-		Confidence     int                 `json:"confidence"`
-		Exploitability string              `json:"exploitability"`
-		FixPriority    string              `json:"fix_priority"`
-		BlastRadius    jsonBlastRadius     `json:"blast_radius"`
-		MITRE          []jsonMITRE         `json:"mitre,omitempty"`
-		Evidence       []jsonEvidence      `json:"evidence"`
+		ID              string              `json:"id"`
+		Name            string              `json:"name"`
+		Boundary        string              `json:"boundary"`
+		Status          string              `json:"status"`
+		Confidence      int                 `json:"confidence"`
+		Exploitability  string              `json:"exploitability"`
+		FixPriority     string              `json:"fix_priority"`
+		BlastRadius     jsonBlastRadius     `json:"blast_radius"`
+		MITRE           []jsonMITRE         `json:"mitre,omitempty"`
+		Evidence        []jsonEvidence      `json:"evidence"`
 		ValidationProof jsonValidationProof `json:"validation_proof"`
-		AttackPath     []string            `json:"attack_path,omitempty"`
-		Impact         []string            `json:"impact,omitempty"`
-		Remediation    string              `json:"remediation"`
-		ProofOfConcept string              `json:"proof_of_concept,omitempty"`
+		AttackPath      []string            `json:"attack_path,omitempty"`
+		Impact          []string            `json:"impact,omitempty"`
+		Remediation     string              `json:"remediation"`
+		ProofOfConcept  string              `json:"proof_of_concept,omitempty"`
 	}
 	type jsonCapabilityBreaks struct {
 		BlastMode string   `json:"blast_mode"`
@@ -112,19 +112,19 @@ func WriteJSON(findings []*core.Finding, cbResult core.CBAnalysisResult, meta Re
 		Breaks    []jsonCB `json:"breaks"`
 	}
 	type jsonCompound struct {
-		ID            string          `json:"id"`
-		Name          string          `json:"name"`
-		ConstituentCBs []string       `json:"constituent_cbs"`
-		Confidence    int             `json:"confidence"`
-		Path          []string        `json:"path,omitempty"`
-		Impact        string          `json:"impact,omitempty"`
-		Remediation   string          `json:"remediation,omitempty"`
-		MITRE         []jsonMITRE     `json:"mitre,omitempty"`
-		BlastRadius   jsonBlastRadius `json:"blast_radius"`
+		ID             string          `json:"id"`
+		Name           string          `json:"name"`
+		ConstituentCBs []string        `json:"constituent_cbs"`
+		Confidence     int             `json:"confidence"`
+		Path           []string        `json:"path,omitempty"`
+		Impact         string          `json:"impact,omitempty"`
+		Remediation    string          `json:"remediation,omitempty"`
+		MITRE          []jsonMITRE     `json:"mitre,omitempty"`
+		BlastRadius    jsonBlastRadius `json:"blast_radius"`
 	}
 	type jsonCompoundBreaks struct {
-		Count   int            `json:"count"`
-		Breaks  []jsonCompound `json:"breaks"`
+		Count  int            `json:"count"`
+		Breaks []jsonCompound `json:"breaks"`
 	}
 	type jsonReport struct {
 		Scan             jsonScan             `json:"scan"`
@@ -239,15 +239,15 @@ func WriteJSON(findings []*core.Finding, cbResult core.CBAnalysisResult, meta Re
 
 // ReportData is passed into the HTML template.
 type ReportData struct {
-	GeneratedAt   string
-	Meta          ReportMeta
-	Summary       core.Summary
-	Score         int
-	Grade         string
-	ScoreColor    string
-	SeverityMax   int
-	Findings      []*core.Finding
-	CISCompliance compliance.ComplianceSummary
+	GeneratedAt    string
+	Meta           ReportMeta
+	Summary        core.Summary
+	Score          int
+	Grade          string
+	ScoreColor     string
+	SeverityMax    int
+	Findings       []*core.Finding
+	CISCompliance  compliance.ComplianceSummary
 	CISTopControls []cisControlRow
 	// Capability Break fields
 	CapabilityBreaks   []core.CapabilityBreak
@@ -281,16 +281,16 @@ func WriteHTML(findings []*core.Finding, cbResult core.CBAnalysisResult, meta Re
 	cisControls := buildCISTopControls(findings)
 
 	data := ReportData{
-		GeneratedAt:    time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
-		Meta:           meta,
-		CISCompliance:  cisCS,
-		CISTopControls: cisControls,
-		Summary:     summary,
-		Score:       score,
-		Grade:       grade,
-		ScoreColor:  gradeHex(grade),
-		SeverityMax: severityMax,
-		Findings:    findings,
+		GeneratedAt:        time.Now().UTC().Format("2006-01-02 15:04:05 UTC"),
+		Meta:               meta,
+		CISCompliance:      cisCS,
+		CISTopControls:     cisControls,
+		Summary:            summary,
+		Score:              score,
+		Grade:              grade,
+		ScoreColor:         gradeHex(grade),
+		SeverityMax:        severityMax,
+		Findings:           findings,
 		CapabilityBreaks:   cbResult.CapabilityBreaks,
 		CompoundBreaks:     cbResult.CompoundBreaks,
 		FindingCBMap:       cbResult.FindingCBMap,
@@ -1823,9 +1823,12 @@ func WriteSARIF(findings []*core.Finding, meta ReportMeta, path string) error {
 		InformationURI string      `json:"informationUri"`
 		Rules          []sarifRule `json:"rules"`
 	}
+	type sarifTool struct {
+		Driver sarifDriver `json:"driver"`
+	}
 	type sarifRun struct {
-		Tool    struct{ Driver sarifDriver } `json:"tool"`
-		Results []sarifResult               `json:"results"`
+		Tool    sarifTool     `json:"tool"`
+		Results []sarifResult `json:"results"`
 	}
 	type sarifRoot struct {
 		Version string     `json:"version"`
@@ -1834,7 +1837,10 @@ func WriteSARIF(findings []*core.Finding, meta ReportMeta, path string) error {
 	}
 
 	rulesSeen := make(map[string]bool)
-	var rules []sarifRule
+	// Initialize as empty (non-nil) slices so a zero-finding report serializes to
+	// "rules": [] / "results": [] rather than null — strict SARIF consumers
+	// (GitHub Advanced Security) reject a null where an array is expected.
+	rules := []sarifRule{}
 	for _, f := range findings {
 		if !rulesSeen[f.Title] {
 			rulesSeen[f.Title] = true
@@ -1848,7 +1854,7 @@ func WriteSARIF(findings []*core.Finding, meta ReportMeta, path string) error {
 		}
 	}
 
-	var results []sarifResult
+	results := []sarifResult{}
 	for _, f := range findings {
 		results = append(results, sarifResult{
 			RuleID: sarifRuleID(f.Title),
@@ -1890,11 +1896,11 @@ func WriteSARIF(findings []*core.Finding, meta ReportMeta, path string) error {
 		Version: "2.1.0",
 		Schema:  "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
 		Runs: []sarifRun{{
-			Tool: struct{ Driver sarifDriver }{
+			Tool: sarifTool{
 				Driver: sarifDriver{
 					Name:           "k8scan",
 					Version:        ver,
-					InformationURI: "https://github.com/alperenkeskin/k8scan",
+					InformationURI: "https://github.com/alperenkesk/k8scan",
 					Rules:          rules,
 				},
 			},

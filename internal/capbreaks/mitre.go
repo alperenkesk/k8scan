@@ -1,6 +1,6 @@
 package capbreaks
 
-import "github.com/alperenkeskin/k8scan/internal/core"
+import "github.com/alperenkesk/k8scan/internal/core"
 
 // MITRE ATT&CK for Containers technique sets per CB rule.
 

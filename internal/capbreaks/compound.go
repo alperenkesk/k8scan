@@ -3,7 +3,7 @@ package capbreaks
 import (
 	"math"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/core"
 )
 
 // compoundRule defines a known multi-stage attack path composed of 2+ CBs.

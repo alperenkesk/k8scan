@@ -35,8 +35,11 @@ venv.bak/
 .DS_Store
 k8s-scan-report.*
 
-# Reports directory - scan outputs
-reports/
+# Reports directory - scan outputs (ignored except the committed sample report).
+# Use reports/* (not reports/) so the negation below can re-include specific files.
+reports/*
+!reports/example-report.html
+!reports/example-report.json
 
 # Compiled binaries
 bin/

@@ -9,8 +9,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
-	"github.com/alperenkeskin/k8scan/internal/utils"
+	"github.com/alperenkesk/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/utils"
 )
 
 // selfPodName / selfPodNamespace identify k8scan's own pod when it runs in-cluster
@@ -364,8 +364,11 @@ func checkSecurityContext(pod corev1.Pod, targetOS string, conf core.Confidence)
 			})
 			continue
 		}
-		// Check runAsNonRoot
-		if c.SecurityContext.RunAsNonRoot == nil || !*c.SecurityContext.RunAsNonRoot {
+		// Check runAsNonRoot — honour a pod-level securityContext that already
+		// guarantees non-root, and treat an explicit non-zero runAsUser as safe.
+		// Without this, setting runAsNonRoot at the pod level (a common pattern)
+		// still flagged every container. See guaranteedNonRoot.
+		if !guaranteedNonRoot(pod, c) {
 			findings = append(findings, &core.Finding{
 				Severity:     core.SeverityMedium,
 				Category:     "container",
@@ -398,6 +401,37 @@ func checkSecurityContext(pod corev1.Pod, targetOS string, conf core.Confidence)
 		}
 	}
 	return findings
+}
+
+// guaranteedNonRoot reports whether the container is guaranteed not to run as
+// root, considering both the container securityContext and the pod-level
+// securityContext fallback. A container-level setting takes precedence; an
+// explicit runAsUser decides by UID (0 = root).
+func guaranteedNonRoot(pod corev1.Pod, c corev1.Container) bool {
+	return guaranteedNonRootCtx(pod.Spec.SecurityContext, c.SecurityContext)
+}
+
+// guaranteedNonRootCtx is the context-level core of guaranteedNonRoot, shared
+// with the workload-template path in resource.go. A container-level setting takes
+// precedence over the pod-level fallback; an explicit runAsUser decides by UID.
+func guaranteedNonRootCtx(podSC *corev1.PodSecurityContext, cSC *corev1.SecurityContext) bool {
+	if cSC != nil {
+		if cSC.RunAsUser != nil {
+			return *cSC.RunAsUser != 0
+		}
+		if cSC.RunAsNonRoot != nil {
+			return *cSC.RunAsNonRoot
+		}
+	}
+	if podSC != nil {
+		if podSC.RunAsUser != nil {
+			return *podSC.RunAsUser != 0
+		}
+		if podSC.RunAsNonRoot != nil {
+			return *podSC.RunAsNonRoot
+		}
+	}
+	return false
 }
 
 func checkPrivilegeEscalation(pod corev1.Pod, targetOS string, conf core.Confidence) []*core.Finding {
@@ -467,10 +501,11 @@ func checkSeccompProfile(pod corev1.Pod, targetOS string, conf core.Confidence) 
 		return nil
 	}
 	var findings []*core.Finding
-	// Pod-level seccomp
+	// Pod-level seccomp. A Localhost profile points to a node-loaded profile that
+	// is typically MORE restrictive than RuntimeDefault, so it counts as configured.
 	podHasSeccomp := false
 	if pod.Spec.SecurityContext != nil && pod.Spec.SecurityContext.SeccompProfile != nil {
-		if pod.Spec.SecurityContext.SeccompProfile.Type == "RuntimeDefault" {
+		if isConfiguredSeccompType(pod.Spec.SecurityContext.SeccompProfile.Type) {
 			podHasSeccomp = true
 		}
 	}
@@ -480,7 +515,7 @@ func checkSeccompProfile(pod corev1.Pod, targetOS string, conf core.Confidence) 
 		}
 		containerHasSeccomp := false
 		if c.SecurityContext != nil && c.SecurityContext.SeccompProfile != nil {
-			if c.SecurityContext.SeccompProfile.Type == "RuntimeDefault" {
+			if isConfiguredSeccompType(c.SecurityContext.SeccompProfile.Type) {
 				containerHasSeccomp = true
 			}
 		}
@@ -503,11 +538,20 @@ func checkSeccompProfile(pod corev1.Pod, targetOS string, conf core.Confidence) 
 	return findings
 }
 
+// isConfiguredSeccompType reports whether a seccomp profile type provides real
+// syscall filtering. Both RuntimeDefault and Localhost qualify; only an unset or
+// Unconfined profile leaves syscalls unrestricted.
+func isConfiguredSeccompType(t corev1.SeccompProfileType) bool {
+	return t == corev1.SeccompProfileTypeRuntimeDefault || t == corev1.SeccompProfileTypeLocalhost
+}
+
 func checkImageTags(pod corev1.Pod, targetOS string, conf core.Confidence) []*core.Finding {
 	var findings []*core.Finding
 	for _, c := range allContainers(pod) {
 		image := c.Image
-		if !strings.Contains(image, ":") || strings.HasSuffix(image, ":latest") {
+		// imageHasExplicitTag ignores the ":" in a registry host:port prefix so an
+		// untagged image like "myreg:5000/app" is still caught as latest.
+		if !imageHasExplicitTag(image) || strings.HasSuffix(image, ":latest") {
 			findings = append(findings, &core.Finding{
 				Severity:     core.SeverityInfo,
 				Category:     "workload",
@@ -531,8 +575,8 @@ var secretEnvPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(password|passwd|pwd|secret|api_key|apikey|token|access_key|private_key|auth_token|db_pass)`),
 }
 var highConfidenceEnvPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                // AWS key
-	regexp.MustCompile(`ghp_[A-Za-z0-9_]{36,}`),           // GitHub token
+	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                   // AWS key
+	regexp.MustCompile(`ghp_[A-Za-z0-9_]{36,}`),              // GitHub token
 	regexp.MustCompile(`-----BEGIN [A-Z]+ PRIVATE KEY-----`), // private key
 }
 
@@ -797,8 +841,8 @@ func checkExplicitRootUser(pod corev1.Pod, targetOS string, conf core.Confidence
 				Title:        "Container Explicitly Runs as Root (UID 0)",
 				Description:  fmt.Sprintf("Container '%s' in pod '%s' sets runAsUser: 0 — explicitly running as root. Even with runAsNonRoot: false this is a deliberate misconfiguration.", c.Name, pod.Name),
 				ResourceType: "Pod", ResourceName: pod.Name, Namespace: pod.Namespace,
-				Remediation:  "Set runAsUser to a non-zero UID (e.g. 1000) and runAsNonRoot: true.",
-				TargetOS:     targetOS, Confidence: conf,
+				Remediation: "Set runAsUser to a non-zero UID (e.g. 1000) and runAsNonRoot: true.",
+				TargetOS:    targetOS, Confidence: conf,
 			})
 		}
 	}
@@ -810,8 +854,8 @@ func checkExplicitRootUser(pod corev1.Pod, targetOS string, conf core.Confidence
 			Title:        "Container Explicitly Runs as Root (UID 0)",
 			Description:  fmt.Sprintf("Pod '%s' sets pod-level runAsUser: 0 — all containers run as root unless overridden.", pod.Name),
 			ResourceType: "Pod", ResourceName: pod.Name, Namespace: pod.Namespace,
-			Remediation:  "Set runAsUser to a non-zero UID and runAsNonRoot: true at pod or container level.",
-			TargetOS:     targetOS, Confidence: conf,
+			Remediation: "Set runAsUser to a non-zero UID and runAsNonRoot: true at pod or container level.",
+			TargetOS:    targetOS, Confidence: conf,
 		})
 	}
 	return findings
@@ -830,9 +874,9 @@ func checkHostPorts(pod corev1.Pod, targetOS string, conf core.Confidence) []*co
 					Title:        "Container HostPort Binding",
 					Description:  fmt.Sprintf("Container '%s' in pod '%s' binds hostPort %d — the port is exposed directly on the node's IP, bypassing NetworkPolicy and Service abstractions.", c.Name, pod.Name, p.HostPort),
 					ResourceType: "Pod", ResourceName: pod.Name, Namespace: pod.Namespace,
-					Remediation:  "Use a Service (ClusterIP/NodePort/LoadBalancer) instead of hostPort. HostPort is a node-level binding that breaks network policy enforcement.",
-					TargetOS:     targetOS, Confidence: conf,
-					Metadata:     map[string]any{"container": c.Name, "host_port": p.HostPort},
+					Remediation: "Use a Service (ClusterIP/NodePort/LoadBalancer) instead of hostPort. HostPort is a node-level binding that breaks network policy enforcement.",
+					TargetOS:    targetOS, Confidence: conf,
+					Metadata: map[string]any{"container": c.Name, "host_port": p.HostPort},
 				})
 			}
 		}
@@ -862,9 +906,9 @@ func checkUnsafeSysctls(pod corev1.Pod, targetOS string, conf core.Confidence) [
 					Title:        "Unsafe Sysctl Parameter",
 					Description:  fmt.Sprintf("Pod '%s' sets sysctl '%s=%s' — modifying kernel parameters can destabilize the node or enable privilege escalation.", pod.Name, s.Name, s.Value),
 					ResourceType: "Pod", ResourceName: pod.Name, Namespace: pod.Namespace,
-					Remediation:  "Remove unsafe sysctl settings. If required, use only safe sysctls listed in the Kubernetes documentation and enforce with Pod Security Admission.",
-					TargetOS:     targetOS, Confidence: conf,
-					Metadata:     map[string]any{"sysctl": s.Name, "value": s.Value},
+					Remediation: "Remove unsafe sysctl settings. If required, use only safe sysctls listed in the Kubernetes documentation and enforce with Pod Security Admission.",
+					TargetOS:    targetOS, Confidence: conf,
+					Metadata: map[string]any{"sysctl": s.Name, "value": s.Value},
 				})
 				break
 			}
@@ -885,8 +929,8 @@ func checkShareProcessNamespace(pod corev1.Pod, targetOS string, conf core.Confi
 		Title:        "Shared Process Namespace Enabled",
 		Description:  fmt.Sprintf("Pod '%s' has shareProcessNamespace: true — all containers share the same PID namespace and can inspect each other's processes and memory.", pod.Name),
 		ResourceType: "Pod", ResourceName: pod.Name, Namespace: pod.Namespace,
-		Remediation:  "Set shareProcessNamespace: false (default). Only enable if a sidecar must signal the main process (e.g. log rotation).",
-		TargetOS:     targetOS, Confidence: conf,
+		Remediation: "Set shareProcessNamespace: false (default). Only enable if a sidecar must signal the main process (e.g. log rotation).",
+		TargetOS:    targetOS, Confidence: conf,
 	}}
 }
 
@@ -902,8 +946,8 @@ func checkTerminationGracePeriod(pod corev1.Pod, targetOS string, conf core.Conf
 		Title:        "Zero Termination Grace Period",
 		Description:  fmt.Sprintf("Pod '%s' sets terminationGracePeriodSeconds: 0 — containers receive SIGKILL immediately with no chance to flush buffers, close connections, or complete in-flight requests.", pod.Name),
 		ResourceType: "Pod", ResourceName: pod.Name, Namespace: pod.Namespace,
-		Remediation:  "Set terminationGracePeriodSeconds to at least 30 seconds. Implement SIGTERM handler in your application for graceful shutdown.",
-		TargetOS:     targetOS, Confidence: conf,
+		Remediation: "Set terminationGracePeriodSeconds to at least 30 seconds. Implement SIGTERM handler in your application for graceful shutdown.",
+		TargetOS:    targetOS, Confidence: conf,
 	}}
 }
 
@@ -920,9 +964,9 @@ func checkBidirectionalMount(pod corev1.Pod, targetOS string, conf core.Confiden
 					Title:        "Bidirectional Volume Mount Propagation",
 					Description:  fmt.Sprintf("Container '%s' in pod '%s' uses Bidirectional mount propagation on volume '%s' — the container can create mounts on the host that persist after the container exits.", c.Name, pod.Name, vm.Name),
 					ResourceType: "Pod", ResourceName: pod.Name, Namespace: pod.Namespace,
-					Remediation:  "Use HostToContainer or None mount propagation. Bidirectional requires privileged mode and allows host filesystem manipulation.",
-					TargetOS:     targetOS, Confidence: conf,
-					Metadata:     map[string]any{"container": c.Name, "volume": vm.Name},
+					Remediation: "Use HostToContainer or None mount propagation. Bidirectional requires privileged mode and allows host filesystem manipulation.",
+					TargetOS:    targetOS, Confidence: conf,
+					Metadata: map[string]any{"container": c.Name, "volume": vm.Name},
 				})
 			}
 		}
@@ -959,9 +1003,9 @@ func checkSSHServer(pod corev1.Pod, targetOS string, conf core.Confidence) []*co
 				Title:        "SSH Server Running in Container",
 				Description:  fmt.Sprintf("Container '%s' in pod '%s' appears to run an SSH server — SSH in containers creates a persistent backdoor and bypasses Kubernetes audit logging.", c.Name, pod.Name),
 				ResourceType: "Pod", ResourceName: pod.Name, Namespace: pod.Namespace,
-				Remediation:  "Remove the SSH server. Use 'kubectl exec' for debugging. For remote access, use ephemeral debug containers.",
-				TargetOS:     targetOS, Confidence: core.ConfidenceMedium,
-				Metadata:     map[string]any{"container": c.Name, "image": c.Image},
+				Remediation: "Remove the SSH server. Use 'kubectl exec' for debugging. For remote access, use ephemeral debug containers.",
+				TargetOS:    targetOS, Confidence: core.ConfidenceMedium,
+				Metadata: map[string]any{"container": c.Name, "image": c.Image},
 			})
 		}
 	}
@@ -981,9 +1025,9 @@ func checkProcMountUnmasked(pod corev1.Pod, targetOS string, conf core.Confidenc
 					Title:        "Unmasked Proc Filesystem Mount",
 					Description:  fmt.Sprintf("Container '%s' in pod '%s' uses procMount: Unmasked — exposes the full host /proc filesystem, enabling host information disclosure and potential privilege escalation.", c.Name, pod.Name),
 					ResourceType: "Pod", ResourceName: pod.Name, Namespace: pod.Namespace,
-					Remediation:  "Remove procMount: Unmasked. Use the default (Default) proc mount which masks sensitive /proc paths.",
-					TargetOS:     targetOS, Confidence: conf,
-					Metadata:     map[string]any{"container": c.Name},
+					Remediation: "Remove procMount: Unmasked. Use the default (Default) proc mount which masks sensitive /proc paths.",
+					TargetOS:    targetOS, Confidence: conf,
+					Metadata: map[string]any{"container": c.Name},
 				})
 			}
 		}
@@ -1003,9 +1047,9 @@ func checkInitContainerPrivEsc(pod corev1.Pod, targetOS string, conf core.Confid
 				Title:        "Init Container Allows Privilege Escalation",
 				Description:  fmt.Sprintf("Init container '%s' in pod '%s' has allowPrivilegeEscalation: true — init containers run before the application and can obtain elevated privileges during setup.", c.Name, pod.Name),
 				ResourceType: "Pod", ResourceName: pod.Name, Namespace: pod.Namespace,
-				Remediation:  "Set allowPrivilegeEscalation: false on all init containers. They should perform only the minimum setup required.",
-				TargetOS:     targetOS, Confidence: conf,
-				Metadata:     map[string]any{"init_container": c.Name},
+				Remediation: "Set allowPrivilegeEscalation: false on all init containers. They should perform only the minimum setup required.",
+				TargetOS:    targetOS, Confidence: conf,
+				Metadata: map[string]any{"init_container": c.Name},
 			})
 		}
 	}
@@ -1019,10 +1063,8 @@ func checkAppArmorProfile(pod corev1.Pod, targetOS string, conf core.Confidence)
 		return nil
 	}
 	var findings []*core.Finding
-	for _, c := range pod.Spec.Containers {
-		annotationKey := "container.apparmor.security.beta.kubernetes.io/" + c.Name
-		val, ok := pod.Annotations[annotationKey]
-		if ok && val != "" && val != "unconfined" {
+	for _, c := range allContainers(pod) {
+		if hasAppArmorConfigured(pod, c) {
 			continue
 		}
 		findings = append(findings, &core.Finding{
@@ -1031,12 +1073,39 @@ func checkAppArmorProfile(pod corev1.Pod, targetOS string, conf core.Confidence)
 			Title:        "No AppArmor Profile Configured",
 			Description:  fmt.Sprintf("Container '%s' in pod '%s' has no AppArmor profile — kernel Mandatory Access Control (MAC) enforcement is disabled, leaving all syscalls unrestricted.", c.Name, pod.Name),
 			ResourceType: "Pod", ResourceName: pod.Name, Namespace: pod.Namespace,
-			Remediation:  "Add annotation 'container.apparmor.security.beta.kubernetes.io/<container>: runtime/default'. On k8s 1.30+ use securityContext.appArmorProfile.type: RuntimeDefault.",
-			TargetOS:     targetOS, Confidence: conf,
-			Metadata:     map[string]any{"container": c.Name},
+			Remediation: "Set securityContext.appArmorProfile.type: RuntimeDefault (k8s 1.30+), or the legacy annotation 'container.apparmor.security.beta.kubernetes.io/<container>: runtime/default'.",
+			TargetOS:    targetOS, Confidence: conf,
+			Metadata: map[string]any{"container": c.Name},
 		})
 	}
 	return findings
+}
+
+// hasAppArmorConfigured reports whether an AppArmor profile is enforced for the
+// container via any supported mechanism:
+//   - the k8s 1.30+ securityContext.appArmorProfile field (container or pod level)
+//   - the legacy beta annotation container.apparmor.security.beta.kubernetes.io/<name>
+//
+// An Unconfined profile (either form) counts as NOT configured.
+func hasAppArmorConfigured(pod corev1.Pod, c corev1.Container) bool {
+	if c.SecurityContext != nil && isEnforcedAppArmor(c.SecurityContext.AppArmorProfile) {
+		return true
+	}
+	if pod.Spec.SecurityContext != nil && isEnforcedAppArmor(pod.Spec.SecurityContext.AppArmorProfile) {
+		return true
+	}
+	annotationKey := "container.apparmor.security.beta.kubernetes.io/" + c.Name
+	if val, ok := pod.Annotations[annotationKey]; ok && val != "" && val != "unconfined" {
+		return true
+	}
+	return false
+}
+
+func isEnforcedAppArmor(p *corev1.AppArmorProfile) bool {
+	if p == nil {
+		return false
+	}
+	return p.Type == corev1.AppArmorProfileTypeRuntimeDefault || p.Type == corev1.AppArmorProfileTypeLocalhost
 }
 
 // ─── Ephemeral container security context ────────────────────────────────────
@@ -1051,9 +1120,9 @@ func checkEphemeralContainerSecurity(pod corev1.Pod, targetOS string, conf core.
 				Title:        "Ephemeral Container Without Security Context",
 				Description:  fmt.Sprintf("Ephemeral container '%s' in pod '%s' has no securityContext — debug containers run without restrictions and can be used for privilege escalation.", ec.Name, pod.Name),
 				ResourceType: "Pod", ResourceName: pod.Name, Namespace: pod.Namespace,
-				Remediation:  "Add securityContext to ephemeral containers with at minimum: runAsNonRoot: true, allowPrivilegeEscalation: false.",
-				TargetOS:     targetOS, Confidence: conf,
-				Metadata:     map[string]any{"ephemeral_container": ec.Name},
+				Remediation: "Add securityContext to ephemeral containers with at minimum: runAsNonRoot: true, allowPrivilegeEscalation: false.",
+				TargetOS:    targetOS, Confidence: conf,
+				Metadata: map[string]any{"ephemeral_container": ec.Name},
 			})
 		}
 	}

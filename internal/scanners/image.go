@@ -7,7 +7,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/core"
 )
 
 // ImageScanner inspects container image references for security hygiene issues.
@@ -92,12 +92,14 @@ func checkImageDigestPin(image, containerName, rt, rn, ns string) []*core.Findin
 	// :latest and untagged images are already caught by "Image Using Latest Tag" in resource.go/pod.go.
 	// Only fire here for version-tagged images (e.g. nginx:1.25.3) that appear safe but aren't digest-pinned.
 	imgLower := strings.ToLower(image)
-	hasTag := strings.Contains(imgLower, ":")
-	if !hasTag || strings.HasSuffix(imgLower, ":latest") {
+	if !imageHasExplicitTag(imgLower) || strings.HasSuffix(imgLower, ":latest") {
 		return nil
 	}
 	return []*core.Finding{{
-		Severity:     core.SeverityMedium,
+		// LOW severity: nearly every production image is tag-pinned rather than
+		// digest-pinned, so firing MEDIUM here floods reports. Digest pinning is a
+		// hardening best-practice, not an active misconfiguration.
+		Severity:     core.SeverityLow,
 		Category:     "image",
 		Title:        "Image Not Pinned to Digest",
 		Description:  fmt.Sprintf("Container '%s' in %s '%s' uses image '%s' with a tag (not a digest). Tags are mutable — a registry push can silently change what image is pulled, enabling supply-chain attacks.", containerName, rt, rn, image),
@@ -126,16 +128,35 @@ var trustedRegistries = []string{
 	"registry.access.redhat.com/",
 }
 
-// Known public image name prefixes (no registry host, hosted on docker.io/library)
-var dockerHubOfficialPrefixes = []string{
-	"nginx", "redis", "postgres", "mysql", "mongo", "mariadb",
-	"alpine", "ubuntu", "debian", "centos", "fedora",
-	"python", "node", "golang", "ruby", "php", "java",
-	"busybox", "scratch", "hello-world",
-	"openjdk", "adoptopenjdk", "eclipse-temurin",
-	"wordpress", "nextcloud", "drupal",
-	"traefik", "caddy", "haproxy",
-	"grafana/", "prom/", "elastic/",
+// isTrustedRegistryHost recognizes an organization's own private cloud registry
+// by hostname pattern. These are managed, authenticated registries — not the
+// "unknown public registry" the untrusted-registry check is meant to flag.
+// Without this, every EKS/AKS/GKE cluster pulling from its own registry would
+// get a HIGH false positive on every workload.
+func isTrustedRegistryHost(host string) bool {
+	switch {
+	case strings.Contains(host, ".dkr.ecr.") && strings.HasSuffix(host, ".amazonaws.com"):
+		return true // AWS ECR (private): 123456789012.dkr.ecr.us-east-1.amazonaws.com
+	case strings.HasSuffix(host, ".azurecr.io"):
+		return true // Azure Container Registry
+	case strings.HasSuffix(host, ".pkg.dev"):
+		return true // Google Artifact Registry: us-docker.pkg.dev
+	case strings.HasSuffix(host, ".gcr.io"):
+		return true // Google Container Registry (regional mirrors)
+	}
+	return false
+}
+
+// imageHasExplicitTag reports whether the image reference carries a tag,
+// correctly ignoring the ":" in a registry host:port prefix (e.g. the ":5000"
+// in "myreg:5000/app"). The tag, if present, always lives in the final path
+// segment after the last "/".
+func imageHasExplicitTag(image string) bool {
+	name := image
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return strings.Contains(name, ":")
 }
 
 func checkUntrustedRegistry(image, containerName, rt, rn, ns string) []*core.Finding {
@@ -177,6 +198,11 @@ func checkUntrustedRegistry(image, containerName, rt, rn, ns string) []*core.Fin
 	}
 	if !isRegistryHost {
 		return nil // Docker Hub org image (e.g. "bitnami/redis")
+	}
+
+	// The org's own managed cloud registry (ECR/ACR/Artifact Registry) is trusted.
+	if isTrustedRegistryHost(host) {
+		return nil
 	}
 
 	return []*core.Finding{{

@@ -33,6 +33,7 @@ const (
 type CBEvidence struct {
 	FindingID    int
 	Title        string
+	ResourceType string // e.g. "Pod", "Deployment" — lets PoCs build correct kubectl refs
 	ResourceName string
 	Namespace    string
 	Severity     string
@@ -114,9 +115,9 @@ type CapabilityBreak struct {
 	AttackGraph    CBAttackGraph
 	Impact         []string
 	BlastRadius    CBBlastRadius
-	Remediation      string
-	FixPriority      string // P0 | P1 | P2 | P3
-	MITRE            []MITRETechnique
+	Remediation    string
+	FixPriority    string // P0 | P1 | P2 | P3
+	MITRE          []MITRETechnique
 	// ProofOfConcept contains step-by-step commands using real resource names
 	// from the evidence findings — reproducible attack path simulation.
 	ProofOfConcept string
@@ -155,10 +156,10 @@ type CompoundBreak struct {
 // HTML reporter. FindingCBMap and FindingCompoundMap drive cross-reference
 // badges on individual Finding cards (finding → CB → Compound).
 type CBAnalysisResult struct {
-	CapabilityBreaks   []CapabilityBreak
-	CompoundBreaks     []CompoundBreak
+	CapabilityBreaks []CapabilityBreak
+	CompoundBreaks   []CompoundBreak
 	// FindingCBMap maps Finding.FindingID (as string) → CB IDs it contributes to.
-	FindingCBMap       map[string][]string
+	FindingCBMap map[string][]string
 	// FindingCompoundMap maps Finding.FindingID (as string) → Compound IDs it contributes to.
 	FindingCompoundMap map[string][]string
 	BlastMode          CBBlastMode

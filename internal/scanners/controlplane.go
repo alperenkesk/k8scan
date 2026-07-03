@@ -9,7 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"gopkg.in/yaml.v3"
 
-	"github.com/alperenkeskin/k8scan/internal/core"
+	"github.com/alperenkesk/k8scan/internal/core"
 )
 
 // ControlPlaneScanner checks API server config, etcd, PSA, Tiller, and Dashboard exposure.
